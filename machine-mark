@@ -97,7 +97,7 @@ host=$(hostnamectl hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || unam
 # Each module is read on its own (try … catch), so one odd or missing reading
 # leaves the rest intact; missing facts come out as null, not as zero.
 jq -n --argjson ff "$ff" \
-  --arg host "$host" --arg version "${version%-*}" --arg channel "$channel" --arg theme "$theme" \
+  --arg host "$host" --arg themeFolder "$current_theme" --arg version "${version%-*}" --arg channel "$channel" --arg theme "$theme" \
   --argjson upgrades "${upgrades:-0}" --argjson lastUpgrade "${last_upgrade:-0}" \
   --argjson installed "$installed" --argjson now "$(date +%s)" \
   --argjson themes "$themes" --argjson plugins "$plugins" \
@@ -132,6 +132,6 @@ jq -n --argjson ff "$ff" \
                   other: (if ($pkg.all | num) != null and ($pkg.pacman | num) != null then $pkg.all - $pkg.pacman else null end),
                   sizes: $sizes },
       upgrades: $upgrades, lastUpgrade: $lastUpgrade, installed: $installed, upgradesByWeek: $weekly,
-      uptime: (($up.uptime | num) as $u | if $u != null then ($u / 1000 | floor) else null end), now: $now, theme: $theme,
+      uptime: (($up.uptime | num) as $u | if $u != null then ($u / 1000 | floor) else null end), now: $now, theme: $theme, themeFolder: $themeFolder,
       themes: $themes, plugins: $plugins
     }'

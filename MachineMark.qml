@@ -29,6 +29,9 @@ Item {
     function open(payloadJson) {
         opened = true
         colors.reload()
+        // A reading kept from another theme would show that theme's name and
+        // dot until the fresh one landed: wait for the fresh one instead.
+        if (machine && machine.themeFolder !== themeName.text().trim()) machine = null
         read()
     }
 
@@ -103,7 +106,8 @@ Item {
     // The theme's own colours, the same file the shell's Color reads. A theme
     // switch replaces the whole theme folder, which a file watch doesn't
     // survive, so the colours are also read at every opening and whenever
-    // theme.name (rewritten in place on every switch) changes.
+    // theme.name (rewritten in place on every switch) changes. The machine is
+    // read again then too, open or not, so the next opening shows this theme.
     FileView {
         id: themeName
         path: Commons.Color.stateHome + "/omarchy/current/theme.name"
@@ -112,7 +116,7 @@ Item {
         onFileChanged: {
             reload()
             colors.reload()
-            if (root.opened) root.read()
+            root.read()
         }
     }
     FileView {
