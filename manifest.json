@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "erikrjohansson",
   "license": "MIT",
-  "description": "Omarchy's About as a sigil drawn from your machine's real specs. Drag to knead it into a strip of rows and back.",
+  "description": "Your Omarchy machine draws its own little mark from its specs and stats. It opens as the About window; drag to knead it into a strip and back.",
   "kinds": ["overlay"],
   "entryPoints": { "overlay": "MachineMark.qml" },
   "keepLoaded": true
