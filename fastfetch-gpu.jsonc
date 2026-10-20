@@ -1,0 +1,2 @@
+// Read by `machine-mark live`: only the GPU, for its current load.
+{"modules":[{"type":"gpu","driverSpecific":true}]}

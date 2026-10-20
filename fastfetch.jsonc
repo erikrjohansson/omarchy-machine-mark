@@ -1,0 +1,15 @@
+// Read by the machine-mark helper: fastfetch's JSON for the modules the About window draws.
+{
+  "modules": [
+    "cpu",
+    { "type": "gpu", "driverSpecific": true },
+    "memory",
+    { "type": "disk", "folders": "/" },
+    "display",
+    "packages",
+    "os",
+    "kernel",
+    "wm",
+    "uptime"
+  ]
+}

@@ -1,0 +1,137 @@
+#!/bin/bash
+# Prints what the About window draws, as one JSON object on stdout.
+# It only reads: fastfetch, the pacman log and package database, the root
+# filesystem's birth time, the theme folders, the shell's plugin list and
+# Omarchy's own version commands. Nothing is written or changed.
+#   machine-mark        everything (when the window opens)
+#   machine-mark live   memory, GPU load and uptime (every few seconds)
+set -uo pipefail
+
+here=$(dirname "$(readlink -f "$0")")
+log=/var/log/pacman.log
+
+for tool in fastfetch jq; do
+  command -v "$tool" >/dev/null || { echo "$tool is not installed" >&2; exit 2; }
+done
+
+# The GPU the window shows, the same rule in both modes: most shader cores,
+# then a discrete one over an integrated one.
+pick_gpu='def pick_gpu: map(select(type == "object")) | sort_by(-(.coreCount // 0), (.type != "Discrete")) | first;'
+# Names as the window shows them, the same in both modes (the live GPU load is
+# only taken for the GPU whose name matches).
+clean='def clean: gsub("\\((R|TM|tm)\\)"; "") | gsub("^(AMD|Intel|NVIDIA) "; "") | gsub(" (with|w/) .*$"; "")
+             | gsub(" [0-9]+-Core Processor$"; "") | gsub("  +"; " ") | ltrimstr(" ") | rtrimstr(" ");'
+
+if [[ ${1:-} == live ]]; then
+  gpu=$(timeout -k 1 3 fastfetch --format json -c "$here/fastfetch-gpu.jsonc" 2>/dev/null)
+  jq -e 'type == "array"' <<<"$gpu" >/dev/null 2>&1 || gpu='[]'
+  read -r up _ </proc/uptime
+  read -r total avail < <(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } END { print t * 1024, a * 1024 }' /proc/meminfo)
+  jq -cn --argjson gpu "$gpu" --argjson total "${total:-0}" --argjson avail "${avail:-0}" \
+    --argjson up "${up%.*}" --argjson now "$(date +%s)" "$pick_gpu$clean"'
+    (try ($gpu | map(select(.type == "GPU")) | first | .result | pick_gpu) catch null) as $g
+    | { memory: { total: $total, used: ($total - $avail) }, uptime: $up, now: $now,
+        gpu: { name: (($g.name // "") | clean), usage: ($g.coreUsage // null) } }'
+  exit
+fi
+
+ff=$(timeout -k 1 5 fastfetch --format json -c "$here/fastfetch.jsonc" 2>/dev/null)
+jq -e 'type == "array" and length > 0' <<<"$ff" >/dev/null 2>&1 || { echo "fastfetch gave no readings" >&2; exit 3; }
+
+# Upgrades counted in the pacman log; the last one is when the system was last updated.
+upgrades=0 last_upgrade=0
+if [[ -r $log ]]; then
+  upgrades=$(grep -c '\[ALPM\] upgraded' "$log")
+  stamp=$(grep '\[ALPM\] upgraded' "$log" | tail -1 | sed -E 's/^\[([^]]+)\].*/\1/')
+  [[ -n $stamp ]] && last_upgrade=$(date -d "$stamp" +%s 2>/dev/null || echo 0)
+fi
+
+# The root filesystem's birth time, the closest thing to an install date
+# (Omarchy's own About uses it for OS age).
+installed=$(stat -c %W / 2>/dev/null || echo 0)
+[[ $installed =~ ^[0-9]+$ ]] || installed=0
+
+# Upgrades in each week since the install, oldest first (the OS age ring
+# sizes its dots by them). Old logs stamp "[2019-01-01 12:34]", newer ones
+# "[2025-07-06T10:31:58+0000]".
+weekly=null
+if [[ -r $log ]] && (( installed > 0 )); then
+  weekly=$(grep '\[ALPM\] upgraded' "$log" | gawk -v inst="$installed" -v now="$(date +%s)" '
+    match($0, /^\[([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]([0-9]{2}):([0-9]{2})/, a) {
+      w = int((mktime(a[1] " " a[2] " " a[3] " " a[4] " " a[5] " 0") - inst) / 604800); if (w >= 0) c[w]++ }
+    END { n = int((now - inst) / 604800); if (n > 2600) n = 2600
+          printf "["; for (i = 0; i <= n; i++) printf "%s%d", (i ? "," : ""), c[i] + 0; print "]" }' 2>/dev/null)
+  [[ -n $weekly ]] || weekly=null
+fi
+
+# Each pacman package's installed size in KiB, in the order they were
+# installed (the Packages ring draws its lines from them).
+sizes=$(shopt -s nullglob; files=(/var/lib/pacman/local/*/desc)
+  (( ${#files[@]} )) && gawk '/^%INSTALLDATE%$/ { getline; d = $0 } /^%SIZE%$/ { getline; s = $0 }
+    ENDFILE { print d + 0 "\t" s + 0; d = 0; s = 0 }' "${files[@]}" 2>/dev/null |
+  sort -s -n -k1,1 | cut -f2 | jq -sc 'map(. / 1024 | floor)' 2>/dev/null)
+[[ -n $sizes ]] || sizes=null
+
+# Installed themes, by folder name (a user theme overrides a built-in one of
+# the same name), and where the current one sits among them.
+current_theme=$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null || true)
+themes=$(
+  shopt -s nullglob
+  # The same places `omarchy theme set` looks: built-in, then the user's own.
+  for d in "${OMARCHY_PATH:-/usr/share/omarchy}"/themes/*/ "$HOME"/.config/omarchy/themes/*/; do d=${d%/}; printf '%s\n' "${d##*/}"; done |
+  sort -u |
+  jq -Rsc --arg current "$current_theme" '[split("\n")[] | select(length > 0)] | { count: length, current: index($current) }'
+)
+[[ -n $themes ]] || themes='{"count":0,"current":null}'
+
+# Plugins the user added (not Omarchy's built-in ones), and which are on.
+plugins=$(timeout -k 1 3 omarchy-shell shell listPlugins 2>/dev/null |
+  jq -c 'map(select(.firstParty | not)) | { count: length, on: map(.enabled) }' 2>/dev/null)
+[[ -n $plugins ]] || plugins='null'
+
+version=$(timeout -k 1 3 omarchy-version 2>/dev/null || true)
+channel=$(timeout -k 1 3 omarchy-version-channel 2>/dev/null || true)
+theme=$(timeout -k 1 3 omarchy-theme-current 2>/dev/null || true)
+host=$(hostnamectl hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || uname -n)
+
+# Each module is read on its own (try … catch), so one odd or missing reading
+# leaves the rest intact; missing facts come out as null, not as zero.
+jq -n --argjson ff "$ff" \
+  --arg host "$host" --arg version "${version%-*}" --arg channel "$channel" --arg theme "$theme" \
+  --argjson upgrades "${upgrades:-0}" --argjson lastUpgrade "${last_upgrade:-0}" \
+  --argjson installed "$installed" --argjson now "$(date +%s)" \
+  --argjson themes "$themes" --argjson plugins "$plugins" \
+  --argjson weekly "$weekly" --argjson sizes "$sizes" "$pick_gpu$clean"'
+  def mod($t): try ($ff | map(select(type == "object" and .type == $t)) | first | .result) catch null;
+  def num: if type == "number" then . else null end;
+  def obj: if type == "object" then . else {} end;
+  (mod("CPU") | obj) as $cpu | (mod("Memory") | obj) as $mem | (mod("Kernel") | obj) as $kernel
+  | (mod("WM") | obj) as $wm | (mod("Uptime") | obj) as $up | (mod("Packages") | obj) as $pkg
+  | ((try (mod("Disk") | map(select(.mountpoint == "/")) | first) catch null) | obj) as $disk
+  | ((try (mod("Display") | map(select((try (.output.width | num) catch null) != null))
+         | sort_by(-(.output.width * (.output.height // 0)), -(.output.refreshRate // 0)) | first) catch null) | obj) as $dsp
+  | ((try (mod("GPU") | pick_gpu) catch null) | obj) as $gpu
+  | {
+      host: $host,
+      os: { version: (if $version != "" then $version else ((mod("OS") | obj).versionID // "") end), channel: $channel },
+      kernel: ($kernel.release // ""),
+      wm: { name: ($wm.prettyName // ""), version: ($wm.version // "") },
+      cpu: { name: (($cpu.cpu // "") | clean), cores: ($cpu.cores.physical? | num), threads: ($cpu.cores.logical? | num),
+             mhz: (($cpu.frequency.max? // $cpu.frequency.base?) | num) },   # max: what fastfetch shows; base can be the current clock
+      gpu: { name: (($gpu.name // "") | clean), cores: ($gpu.coreCount | num), usage: ($gpu.coreUsage | num),
+             vram: ($gpu.memory.dedicated.total? | num), type: ($gpu.type // "") },
+      memory: { total: ($mem.total | num), used: ($mem.used | num) },
+      disk: { total: ($disk.bytes.total? | num), fs: ($disk.filesystem // ""),
+              # Newer fastfetch gives total and free only; used = total - free, as df shows it.
+              used: (($disk.bytes.used? | num) // ((($disk.bytes.total? | num) // null) as $t | (($disk.bytes.free? | num) // null) as $f
+                     | if $t != null and $f != null then $t - $f else null end)) },
+      display: { width: ($dsp.output.width? | num), height: ($dsp.output.height? | num), hz: ($dsp.output.refreshRate? | num),
+                 inches: (($dsp.physical.width? | num) as $w | ($dsp.physical.height? | num) as $h
+                          | if ($w // 0) > 0 and ($h // 0) > 0 then (($w * $w + $h * $h) | sqrt / 25.4) else null end) },
+      packages: { pacman: ($pkg.pacman | num),
+                  other: (if ($pkg.all | num) != null and ($pkg.pacman | num) != null then $pkg.all - $pkg.pacman else null end),
+                  sizes: $sizes },
+      upgrades: $upgrades, lastUpgrade: $lastUpgrade, installed: $installed, upgradesByWeek: $weekly,
+      uptime: (($up.uptime | num) as $u | if $u != null then ($u / 1000 | floor) else null end), now: $now, theme: $theme,
+      themes: $themes, plugins: $plugins
+    }'
