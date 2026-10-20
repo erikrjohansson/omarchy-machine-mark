@@ -14,9 +14,10 @@ for tool in fastfetch jq; do
   command -v "$tool" >/dev/null || { echo "$tool is not installed" >&2; exit 2; }
 done
 
-# The GPU the window shows, the same rule in both modes: most shader cores,
-# then a discrete one over an integrated one.
-pick_gpu='def pick_gpu: map(select(type == "object")) | sort_by(-(.coreCount // 0), (.type != "Discrete")) | first;'
+# The GPU the window shows, the same rule in both modes: a discrete one over
+# an integrated one, then the most cores. (Discrete first: the core counts of
+# different makers are different units, see Sigil.js GPU_UNITS.)
+pick_gpu='def pick_gpu: map(select(type == "object")) | sort_by((.type != "Discrete"), -(.coreCount // 0)) | first;'
 # Names as the window shows them, the same in both modes (the live GPU load is
 # only taken for the GPU whose name matches).
 clean='def clean: gsub("\\((R|TM|tm)\\)"; "") | gsub("^(AMD|Intel|NVIDIA) "; "") | gsub(" (with|w/) .*$"; "")
@@ -64,8 +65,9 @@ if [[ -r $log ]] && (( installed > 0 )); then
   [[ -n $weekly ]] || weekly=null
 fi
 
-# Each pacman package's installed size in KiB, in the order they were
-# installed (the Packages ring draws its lines from them).
+# Each pacman package's installed size in KiB, in the order they were last
+# installed or upgraded (pacman's install date moves on every upgrade; the
+# Packages ring draws its lines from them).
 sizes=$(shopt -s nullglob; files=(/var/lib/pacman/local/*/desc)
   (( ${#files[@]} )) && gawk '/^%INSTALLDATE%$/ { getline; d = $0 } /^%SIZE%$/ { getline; s = $0 }
     ENDFILE { print d + 0 "\t" s + 0; d = 0; s = 0 }' "${files[@]}" 2>/dev/null |
@@ -119,7 +121,9 @@ jq -n --argjson ff "$ff" \
       cpu: { name: (($cpu.cpu // "") | clean), cores: ($cpu.cores.physical? | num), threads: ($cpu.cores.logical? | num),
              mhz: (($cpu.frequency.max? // $cpu.frequency.base?) | num) },   # max: what fastfetch shows; base can be the current clock
       gpu: { name: (($gpu.name // "") | clean), cores: ($gpu.coreCount | num), usage: ($gpu.coreUsage | num),
-             vram: ($gpu.memory.dedicated.total? | num), type: ($gpu.type // "") },
+             vram: ($gpu.memory.dedicated.total? | num), type: ($gpu.type // ""),
+             # The kernel driver, first word only (fastfetch adds more, "nvidia (proprietary) 580.x"): it says what the core count counts.
+             driver: (if ($gpu.driver | type) == "string" then ($gpu.driver | split(" ") | first // "") else "" end) },
       memory: { total: ($mem.total | num), used: ($mem.used | num) },
       disk: { total: ($disk.bytes.total? | num), fs: ($disk.filesystem // ""),
               # Newer fastfetch gives total and free only; used = total - free, as df shows it.

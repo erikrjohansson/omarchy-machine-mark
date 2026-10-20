@@ -120,8 +120,9 @@ function facts(m, elapsed) {
     f.mem = m.memory.total > 0 ? (m.memory.used || 0) / m.memory.total : 0
     f.disk = m.disk.total > 0 ? (m.disk.used || 0) / m.disk.total : 0
     f.pulses = m.display.hz > 0 ? Math.max(1, Math.round(m.display.hz / 10)) : 0
-    f.gpuBy = m.gpu.cores ? "cores" : m.gpu.vram ? "vram" : ""
-    f.squares = m.gpu.cores ? Math.round(m.gpu.cores / 128) : m.gpu.vram ? Math.round(m.gpu.vram / GIB) : 0
+    f.gpuUnit = m.gpu.cores ? GPU_UNITS[m.gpu.driver] || null : null
+    f.gpuBy = f.gpuUnit ? "cores" : m.gpu.vram ? "vram" : ""
+    f.squares = f.gpuUnit ? Math.max(1, Math.round(m.gpu.cores / f.gpuUnit.per)) : m.gpu.vram ? Math.round(m.gpu.vram / GIB) : 0
     f.squares = clamp(f.squares, 0, 192)
     f.weeks = Math.ceil(f.days / 7)
     // How much each mark of the counted rings stands for, and how many marks.
@@ -132,6 +133,19 @@ function facts(m, elapsed) {
     f.pkgSizes = !!(m.packages.sizes && m.packages.sizes.length)
     f.weekly = !!(m.upgradesByWeek && m.upgradesByWeek.length)
     return f
+}
+
+// fastfetch's GPU core count is a different unit for each driver: NVIDIA's
+// CUDA cores, AMD's compute units (64 shader cores each), Intel's execution
+// units (8 lanes each). A dot is one block of about that size: 128 CUDA
+// cores (an SM), one compute unit, 8 execution units. Other drivers' counts
+// (nouveau, asahi) aren't comparable, so those draw their VRAM instead.
+var GPU_UNITS = {
+    nvidia: { per: 128, word: "core", long: "shader cores" },
+    amdgpu: { per: 1, word: "CU", long: "compute units" },
+    radeon: { per: 1, word: "CU", long: "compute units" },
+    i915:   { per: 8, word: "EU", long: "execution units" },
+    xe:     { per: 8, word: "EU", long: "execution units" }
 }
 
 // A counted ring gets coarser once its count would crowd it: a mark then
@@ -184,7 +198,7 @@ function fact(k, m, f, themeName) {
         if (!m.cpu.threads) return none
         return { s: count(m.cpu.threads, "thread"), l: m.cpu.threads + (m.cpu.mhz ? " @ " + (m.cpu.mhz / 1000).toFixed(2) + " GHz" : "") }
     case "gpu":
-        if (f.gpuBy === "cores") return { s: num(m.gpu.cores) + " cores", l: m.gpu.name || UNKNOWN }
+        if (f.gpuBy === "cores") return { s: count(m.gpu.cores, f.gpuUnit.word), l: m.gpu.name || UNKNOWN }
         if (f.gpuBy === "vram") return { s: size(m.gpu.vram), l: m.gpu.name || UNKNOWN }
         return { s: m.gpu.type ? m.gpu.type.toLowerCase() : UNKNOWN, l: m.gpu.name || UNKNOWN }
     case "mem":
@@ -236,7 +250,7 @@ function say(k, m, f, themeName) {
         if (!m.cpu.threads) return "The CPU didn't report its threads."
         return "It runs " + count(m.cpu.threads, "thread") + (m.cpu.mhz ? " at " + (m.cpu.mhz / 1000).toFixed(2) + " GHz" : "") + ". " + (f.per.threads === 1 ? "Each thread is one line of dots." : "Each line of dots is " + f.per.threads + " threads.")
     case "gpu":
-        if (f.gpuBy === "cores") return "Your " + m.gpu.name + " has " + num(m.gpu.cores) + " shader cores, one dot per 128."
+        if (f.gpuBy === "cores") return "Your " + m.gpu.name + " has " + num(m.gpu.cores) + " " + f.gpuUnit.long + ", one dot " + (f.gpuUnit.per === 1 ? "each." : "per " + f.gpuUnit.per + ".")
             + (m.gpu.usage !== null && m.gpu.usage !== undefined ? " Its load right now is " + Math.round(m.gpu.usage) + "%." : "")
         if (f.gpuBy === "vram") return "Your " + m.gpu.name + " has " + size(m.gpu.vram) + " of video memory, one dot per GiB."
         return "The GPU didn't report its cores or memory, so there are no dots."
@@ -251,8 +265,8 @@ function say(k, m, f, themeName) {
         return "Your " + (m.display.inches ? Math.round(m.display.inches) + "″ " : "") + "display runs at " + Math.round(m.display.hz) + " Hz. Each pulse in the wave is 10 Hz."
     case "pkgs":
         if (m.packages.pacman === null || m.packages.pacman === undefined) return "Packages weren't reported."
-        return "You have " + num(m.packages.pacman) + " pacman packages" + (m.packages.other ? ", plus " + num(m.packages.other) + " from Flatpak and AppImage" : "") + ". "
-            + (f.pkgSizes ? "Each line is " + f.per.pkgs + " in install order; taller ones are bigger." : "Each line of dots is " + f.per.pkgs + " packages.")
+        return "You have " + num(m.packages.pacman) + " pacman packages" + (m.packages.other ? " and " + num(m.packages.other) + " others" : "") + ". "
+            + (f.pkgSizes ? "Each line is " + f.per.pkgs + ", by last install or upgrade; taller ones are bigger." : "Each line of dots is " + f.per.pkgs + " packages.")
     case "upd": return num(m.upgrades) + " packages have been upgraded" + (m.installed > 0 ? " since " + day(m.installed) : "") + ". Each short run of dots is " + num(f.per.upd) + " upgrades."
     case "theme":
         var all = m.themes && m.themes.count
@@ -296,7 +310,7 @@ function geometry(m) {
     }
     // Where the helper read them, package lines and age dots come from the
     // machine's own history instead of the seed: each line's height is the
-    // disk space of its packages (in install order, on a log scale), each
+    // disk space of its packages (by last install or upgrade, on a log scale), each
     // dot's size the upgrades in its weeks.
     if (f.pkgSizes && g.tick.length) {
         var logs = groups(m.packages.sizes, g.tick.length, 1).map(function(v) { return Math.log(1 + v) })
@@ -355,8 +369,8 @@ function marks(k, s) {
             out.push({ d: "tick", u: (j + 0.5) / n, w0: -1, w1: -1 + 2 * lerp(0.8, 0.3 + 0.7 * g.spoke[j % g.spoke.length], vary), lw: f.per.threads > 1 ? 1.7 : 1, col: C })
         break
     case "gpu":
-        // A still count, like the cores: one dot per 128 shader cores (or
-        // per GiB of VRAM). Not a load gauge: kneading the window itself
+        // A still count, like the cores: one dot per block of shader cores
+        // (GPU_UNITS), or per GiB of VRAM. Not a load gauge: kneading the window itself
         // loads the GPU, so a live gauge filled in at the end of every knead.
         n = f.squares
         var sz = clamp(1.3 * Math.sqrt(68 / Math.max(1, n)), 0.95, 2.6)
