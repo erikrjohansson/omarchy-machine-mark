@@ -39,9 +39,9 @@ Item {
     readonly property color fg: Commons.Color.menu.text
     readonly property color dimFg: Qt.darker(fg, 1.4)
     // The knead canvas paints the window's colour under its drawing so the
-    // layers below can't show through; on see-through themes that would
+    // layers below can't show through; on a see-through window that would
     // thicken the background, so there the two cross-fade instead.
-    readonly property color surface: Commons.Color.background
+    property color surface: Commons.Color.background
     readonly property bool occlude: surface.a >= 0.9
     function rgba(c) { return "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + c.a + ")" }
 
@@ -438,7 +438,18 @@ Item {
 
     // Once the layers are drawn and up under the canvas, the canvas fades
     // out over them: the softer knead frames dissolve into the sharp layers.
-    Timer { id: hideCanvas; interval: 50; onTriggered: if (card.layersReady) fadeCanvas.restart() }
+    // On a see-through window the layers can't sit under the canvas, and two
+    // halves of a cross-fade let the background through (the marks dipped by
+    // a quarter), so there the two swap in one frame, as a knead starts.
+    Timer {
+        id: hideCanvas
+        interval: 50
+        onTriggered: {
+            if (!card.layersReady) return
+            if (card.occlude) fadeCanvas.restart()
+            else { card.showCanvas = false; card.canvasFade = 1 }
+        }
+    }
     // At the start of a knead the canvas fades in over the sharp layers the
     // same way (the rings have barely moved in that time), instead of
     // replacing them in one frame at its lower resolution.

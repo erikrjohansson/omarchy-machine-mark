@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
@@ -128,6 +129,44 @@ Item {
         onLoaded: root.palette = Sigil.palette(text())
     }
 
+    // Omarchy's Window Opacity setting (opaque, transparent or glassy), which
+    // its own About follows as a terminal. Opaque and glassy are each a toggle
+    // file; the setting writes them and then reloads Hyprland.
+    property bool opaqueOn: false
+    property bool glassyOn: false
+    readonly property string toggles: Commons.Color.stateHome + "/omarchy/toggles/hypr/"
+    FileView {
+        id: opaqueToggle
+        path: root.toggles + "window-opaque.lua"
+        printErrors: false
+        onLoaded: root.opaqueOn = true
+        onLoadFailed: root.opaqueOn = false
+    }
+    FileView {
+        id: glassyToggle
+        path: root.toggles + "window-glassy.lua"
+        printErrors: false
+        onLoaded: root.glassyOn = true
+        onLoadFailed: root.glassyOn = false
+    }
+    Connections {
+        target: Hyprland
+        function onRawEvent(event) {
+            if (event && String(event.name) === "configreloaded") {
+                opaqueToggle.reload()
+                glassyToggle.reload()
+            }
+        }
+    }
+    // A terminal's see-through: 0.65 when glassy (Hyprland blurs behind it),
+    // Hyprland's 0.985 when transparent. A theme's own see-through colour
+    // stays if it is thinner.
+    readonly property real windowAlpha: opaqueOn ? 1 : glassyOn ? 0.65 : 0.985
+    readonly property color windowColor: {
+        var c = Commons.Color.background
+        return Qt.rgba(c.r, c.g, c.b, Math.min(c.a, windowAlpha))
+    }
+
     // A normal window, like Omarchy's own About: it can be moved, tiled or
     // closed like any other (Esc or Super + W). A fixed size makes Hyprland
     // float and centre it without a window rule.
@@ -137,7 +176,10 @@ Item {
         id: window
         title: "About"
         visible: root.opened
-        color: Commons.Color.background
+        color: root.windowColor
+        // Always with an alpha channel, so a change of setting shows without
+        // rebuilding the window.
+        surfaceFormat.opaque: false
         implicitWidth: root.winW
         implicitHeight: root.winH
         minimumSize: Qt.size(root.winW, root.winH)
@@ -157,6 +199,7 @@ Item {
                 loadError: root.loadError
                 running: root.opened
                 pal: root.palette
+                surface: window.color
                 themeName: root.machine ? root.machine.theme : ""
                 onCloseRequested: root.dismiss()
                 Component.onCompleted: reset()
