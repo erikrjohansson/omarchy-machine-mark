@@ -4,6 +4,12 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui as Ui
 import "Sigil.js" as Sigil
+// The other ways a knead can go: each registers itself with Sigil.
+import "modes/loom.js" as ModeLoom
+import "modes/spool.js" as ModeSpool
+import "modes/coin.js" as ModeCoin
+import "modes/harp.js" as ModeHarp
+import "modes/breakshot.js" as ModeBreakshot
 
 // The About card: the machine as a sigil you can knead into a strip and
 // back. Drag sideways, click, Space or the buttons switch shapes; hovering a
@@ -39,14 +45,46 @@ Item {
     readonly property bool occlude: surface.a >= 0.9
     function rgba(c) { return "rgba(" + Math.round(c.r * 255) + "," + Math.round(c.g * 255) + "," + Math.round(c.b * 255) + "," + c.a + ")" }
 
-    // Each ring's shape: 0 = strip, 1 = sigil, eased one ring after another.
+    // Each ring's shape: 0 = strip, 1 = sigil. All rings move together: the
+    // knead is one burst (Sigil.paintBurst), so they share one shape.
     property var cur: Sigil.RINGS.map(function() { return 1 })
     property int target: 1
     property var anim: null
+    // Kneading back to the sigil: an animation of its own (Sigil.paintReturn),
+    // played through, not scrubbed.
+    property bool back: false
+    // Which way the knead goes (Sigil.modeNames): picked at random as each
+    // starts, unless one is chosen (the number keys; 0 for random again).
+    // Dealt from a shuffled deck, so every mode plays once before any plays
+    // again, and a new deck never starts with the one just played: no two
+    // kneads in a row go the same way.
+    property string mode: "burst"
+    property string modeLock: ""
+    property var modeDeck: []
+    function pickMode() {
+        if (modeLock) return modeLock
+        var deck = modeDeck.slice()
+        // The deck's last card is the one just played (kept to by a lock,
+        // then let go): it goes with the old deck.
+        if (deck.length === 1 && deck[0] === mode) deck = []
+        if (!deck.length) {
+            deck = Sigil.modeNames()
+            for (var i = deck.length - 1; i > 0; i--) {
+                var j = Math.floor(Math.random() * (i + 1)), d = deck[i]
+                deck[i] = deck[j]; deck[j] = d
+            }
+        }
+        // Dealt from the end; the card out never repeats the knead just
+        // played (as after a new deck, or a lock let go).
+        var top = deck.length - 1
+        if (top > 0 && deck[top] === mode) { deck[top] = deck[0]; deck[0] = mode }
+        var m = deck.pop()
+        modeDeck = deck
+        return m
+    }
+    // A press: a click kneads on release; a drag towards the other shape
+    // starts the knead as it moves (it isn't scrubbed).
     property var drag: null
-    // A press only leaves the rest once it moves: a click kneads on release,
-    // and taking the layers down on press showed the canvas a beat early.
-    property bool dragging: false
     property int hi: -1
     property string say: ""      // footer text while hovering the header
     property real builtAt: -1e9
@@ -57,12 +95,17 @@ Item {
     property real textsAt: 0
     property real valW: 0        // widest short value, for the strip's value column
     property real frameT: 0
+    // The knead canvas's moment and shape. It draws in a thread of its own
+    // and shows a refresh after the words moved in the same frame, so it is
+    // drawn a refresh ahead and the two show the same moment.
+    property real canvasT: 0
+    property var canvasCur: null
     property var lastLayout: null   // this frame's layout (canvas, words, pointer)
     property var markCache: ({})    // the knead frames' marks (see Sigil.marksOf)
     property var restLayout: null   // the layout the rest layers were drawn for
 
     // Rest layers: built per rest, acknowledged per build.
-    readonly property int restShape: (!anim && !dragging && !building && machine && geo) ? (allAt(1) ? 1 : allAt(0) ? 0 : -1) : -1
+    readonly property int restShape: (!anim && !building && machine && geo) ? (allAt(1) ? 1 : allAt(0) ? 0 : -1) : -1
     property int buildGen: 0
     property var awaiting: ({})
     property bool layersReady: false
@@ -73,26 +116,43 @@ Item {
     property int dynTick: 0
 
     readonly property real shape: Sigil.average(cur)
+    // What the words need to know of this frame (Sigil.wordAlpha); the
+    // knead's cache is filled in place, so this follows the shape.
+    readonly property var wordCtx: ({ mark: shape >= 0 ? markPos() : null, back: back, mc: markCache, mode: mode })
+    // The list's place in its suck-in (back to the sigil, on its own clock).
+    readonly property real listB: Sigil.listB(1 - shape, back, mode)
 
+    // The window's own scale (1.25 on a 1.25-scaled output). Screen's is the
+    // output's scale rounded up (2 there): every canvas was drawn at 2x, 2.6
+    // times the pixels, only to be scaled down on the GPU.
+    readonly property real pxRatio: (Window.window && Window.window.devicePixelRatio) || Screen.devicePixelRatio || 1
     function now() { return Date.now() }
     // A position rounded down to the screen's pixel grid, so the rest layers
     // land on the same pixels as the knead canvas they replace.
-    function snap(v) { var d = Screen.devicePixelRatio || 1; return Math.floor(v * d + 1e-6) / d }
+    function snap(v) { var d = card.pxRatio; return Math.floor(v * d + 1e-6) / d }
     function allAt(v) { for (var i = 0; i < cur.length; i++) if (cur[i] !== v) return false; return true }
     function geoKey(m) { return [m.host, m.cpu.name, m.gpu.name, m.installed, m.cpu.threads, m.packages.pacman, m.upgrades].join("|") }
-    function layoutNow() { return Sigil.layout(stage.width, stage.height, { unit: unit, valW: valW }) }
+    // The layout, made again only when what it depends on changes: a new
+    // one every frame made every binding on it work again.
+    property var layoutMemo: null
+    function layoutNow() {
+        var key = [stage.width, stage.height, unit, valW].join()
+        if (!layoutMemo || layoutMemo.key !== key) layoutMemo = { key: key, Y: Sigil.layout(stage.width, stage.height, { unit: unit, valW: valW }) }
+        return layoutMemo.Y
+    }
 
     // ------------------------------------------------------------ opening
 
     // Opening starts from the sigil, the rings building in one by one.
     function reset() {
         cur = Sigil.RINGS.map(function() { return 1 })
-        target = 1; anim = null; drag = null; dragging = false; hi = -1; say = ""
+        target = 1; anim = null; drag = null; hi = -1; say = ""
         builtAt = now(); building = true; buildDone.restart()
         showLayers = false; layerShape = -1; showCanvas = false
         keys.forceActiveFocus()
     }
     Timer { id: buildDone; interval: 1100; onTriggered: card.building = false }
+    Timer { id: sayDone; interval: 2500; onTriggered: { card.say = ""; card.status = card.statusText() } }
 
     // A new reading redraws only what it changed. The live reading every 4 s
     // changes memory, GPU load and uptime: the memory ring is redrawn (GPU load
@@ -102,7 +162,9 @@ Item {
     property string factsKey: ""
     property var memDrawn: [-1, -1]   // the memory reading each shape's layers show
     onMachineChanged: {
-        markCache = {}
+        // (Not while a knead runs: its particles, worked out as it started,
+        // would be worked out again mid-flight, every 4 s, and jump.)
+        if (restShape >= 0) markCache = {}
         if (!machine) return
         refreshTexts(now())
         if (!geo || geo.key !== geoKey(machine)) {
@@ -132,33 +194,34 @@ Item {
 
     // A knead, once started, plays through: input that would start another
     // (Space, the buttons, a click or a drag) is ignored until it has settled.
-    // So is a key while the pointer holds the shape (the next move took over
-    // from that knead with a jump), and asking for the shape it already is.
+    // So is a key while the pointer is down (its release or move kneads),
+    // and asking for the shape it already is.
     function go(to) {
-        if (anim || drag || dragging || allAt(to)) return
+        if (anim || drag || allAt(to)) return
         target = to
-        anim = { from: cur.slice(), to: to, t0: -1, fast: false }
+        back = to === 1
+        mode = pickMode()
+        pulseB = 1 - shape   // the pulse's clock starts with this knead
+        // Back to the sigil, the logo lets the core go (as the mode has it).
+        if (back && Sigil.modeOf(mode).pulseBack) { pulse.restart(); pulseAt = Date.now() }
+        anim = { from: cur.slice(), to: to, t0: -1 }
     }
 
-    // A drag let go (or cancelled) settles on the nearer shape.
-    function settle() {
-        target = Math.round(shape)
-        anim = { from: cur.slice(), to: target, t0: -1, fast: true }
+    function curAt(t) {
+        if (!anim || anim.t0 < 0) return cur
+        var k = Sigil.clamp((t - anim.t0) / (back ? Sigil.durBack(mode) : Sigil.durOut(mode)), 0, 1)
+        return anim.from.map(function(f) { return Sigil.lerp(f, anim.to, k) })
     }
-
     function step(t) {
         if (!anim) return
         // The clock starts on the first frame drawn, in the frames' own time,
         // so a slow first frame doesn't skip the start of the motion.
         if (anim.t0 < 0) anim.t0 = t
         var done = true, next = cur.slice(), n = next.length
-        for (var i = 0; i < n; i++) {
-            var order = anim.to === 1 ? i : n - 1 - i
-            var dl = anim.fast ? 0 : order * 40, dur = anim.fast ? 280 : 820
-            var k = Sigil.ease(Sigil.clamp((t - anim.t0 - dl) / dur, 0, 1))
-            if (k < 1) done = false
-            next[i] = Sigil.lerp(anim.from[i], anim.to, k)
-        }
+        // A knead runs evenly: the burst eases each dot itself.
+        var k = Sigil.clamp((t - anim.t0) / (back ? Sigil.durBack(mode) : Sigil.durOut(mode)), 0, 1)
+        if (k < 1) done = false
+        for (var i = 0; i < n; i++) next[i] = Sigil.lerp(anim.from[i], anim.to, k)
         cur = next
         if (done) anim = null
     }
@@ -190,16 +253,53 @@ Item {
     function state(t) {
         var m = machine
         return { machine: m, facts: Sigil.facts(m, Math.max(0, (t - readAt) / 1000)), geo: geo, pal: pal,
-                 cur: cur, hi: hi, builtAt: builtAt, unit: unit,
+                 cur: cur, hi: hi, builtAt: builtAt, unit: unit, mark: markPos(), back: back, mode: mode,
                  headW: { hw: headRep.itemAt(0) ? headRep.itemAt(0).implicitWidth : 0,
                           sw: headRep.itemAt(1) ? headRep.itemAt(1).implicitWidth : 0,
-                          age: headRep.itemAt(2) ? headRep.itemAt(2).implicitWidth : 0 } }
+                          age: headRep.itemAt(2) ? headRep.itemAt(2).implicitWidth : 0 },
+                 wordW: wordW() }
+    }
+
+    // The list's names' and values' widths, for what the canvas draws in
+    // with them (Sigil.suckItems).
+    function wordW() {
+        var names = [], vals = []
+        for (var i = 0; i < Sigil.RINGS.length; i++) {
+            var r = wordRep.itemAt(i)
+            names.push(r ? r.nameW : 0); vals.push(r ? r.valW : 0)
+        }
+        return { names: names, vals: vals }
+    }
+
+    // The header's logo in stage coordinates, where the sigil's centre lands.
+    function markPos() {
+        var p = mark.mapToItem(stage, mark.width / 2, mark.height / 2)
+        return { x: p.x, y: p.y }
+    }
+    // The logo pulses as the core lands in it (and as it lets it go on the
+    // way back: see go).
+    property real pulseB: 0
+    property real pulseAt: 0
+    onShapeChanged: {
+        if (back) return
+        var b = 1 - shape, at = lastLayout ? Sigil.corePulse(lastLayout, markPos(), mode) : -1
+        if (at < 0) return
+        if ((b >= at) !== (pulseB >= at) && Date.now() - pulseAt > 500) { pulse.restart(); pulseAt = Date.now() }
+        pulseB = b
     }
 
     // ------------------------------------------------------------ rest layers
 
     onRestShapeChanged: {
-        markCache = {}
+        // A new knead's marks and particles from scratch (back to the sigil,
+        // the burst's particles stay: it goes back through their cloud); at
+        // rest the last knead's stay, for the canvas's last frames as it fades
+        // out (worked out again then, they held a frame 40-70 ms).
+        if (restShape < 0) {
+            var keep = {}
+            if (back) for (var key in markCache) if (key.indexOf("burst") === 0) keep[key] = markCache[key]
+            markCache = keep
+        }
         layersReady = false
         awaiting = ({})
         layerQueue = []
@@ -211,7 +311,19 @@ Item {
         // The first knead frame, drawn for now: frameT still held the end of
         // the last knead, so the turning rings showed at old angles for a frame.
         frameT = now()
+        canvasCur = null
         lastLayout = layoutNow()
+        // The knead's particles are worked out now, before its first frame,
+        // and its clock starts here: built in the first frame (40-80 ms), the
+        // next frame jumped that far into the motion.
+        if (machine && geo) {
+            var st = state(frameT)
+            st.markCache = markCache
+            Sigil.prepare(lastLayout, frameT, st)
+            // (From when that work is done: a cold start (loom, 35 ms) took
+            // that much of the motion's start with it.)
+            if (anim && anim.t0 < 0) anim.t0 = now()
+        }
         canvas.requestPaint()
     }
 
@@ -225,7 +337,7 @@ Item {
     property var drawnKeys: ["", ""]
     property string buildingKey: ""
     function layersKey() {
-        var dpr = Screen.devicePixelRatio || 1
+        var dpr = card.pxRatio
         return JSON.stringify([Math.round(stage.width), Math.round(stage.height), dpr, unit, valW, pal, geo ? geo.key : "", factsKey])
     }
     function forgetLayers() { drawnKeys = ["", ""] }
@@ -373,16 +485,14 @@ Item {
         }
     }
 
-    // While the full canvas is in use, frames are paced by the display: on a
-    // fast display one redraw every other refresh (a steady 60 fps on 120 Hz),
-    // each drawn for the moment it will be on screen. Drawing as fast as
-    // possible gave 67-100 fps that landed unevenly between refreshes, which
-    // looked like stutter (seen in a 60 fps screen recording as a short frame
-    // followed by a double one every ~140 ms).
+    // While the full canvas is in use, every refresh draws, for the moment
+    // it will be on screen (the next refresh; never going back). Drawing
+    // every other refresh (counting triggers) drew 8, 10 and 15 ms apart:
+    // not every trigger is a refresh, as a canvas that has finished drawing
+    // asks for a frame of its own in between.
     property real clock: 0
     property real lastDrawT: 0
-    property int refreshes: 0
-    function kneadTick(t) {
+    function kneadTick(t, ms) {
         step(t)
         frameT = t
         // Layers still showing (under a canvas fading in or out) are turned
@@ -392,26 +502,28 @@ Item {
         // again every few frames was work a knead frame could do without.
         if (t - textsAt > 5000) refreshTexts(t)
         lastLayout = layoutNow()
+        canvasT = Math.max(t + ms, canvasT)
+        canvasCur = curAt(canvasT)
         canvas.requestPaint()
     }
     FrameAnimation {
         // Also while the canvas fades out at rest: a still last frame over
         // layers that kept turning showed two rings apart for a moment.
         running: card.running && card.visible && !!card.machine && !!card.geo && (card.restShape < 0 || !card.layersReady || card.showCanvas)
-        onRunningChanged: if (running) { card.clock = Date.now(); card.refreshes = 0; card.lastDrawT = 0 }
+        onRunningChanged: if (running) { card.clock = Date.now(); card.lastDrawT = 0; card.canvasT = 0 }
         onTriggered: {
             var ms = frameTime * 1000
             if (!(ms > 0 && ms < 100)) ms = 1000 / 60
             card.clock += ms
-            card.refreshes++
-            var every = ms < 10.5 ? 2 : 1
-            if (card.refreshes % every) return
-            // The paint lands on the next refresh: draw for that moment. A long
-            // frame then a short one predicted a moment before the last one
-            // drawn (the motion stepped back a hair), so it never goes back.
-            var t = Math.max(card.clock + ms, card.lastDrawT)
+            // Drawn a refresh ahead (the words), and the canvas one more: by
+            // the refresh (the frames' smoothed time), not this frame's own,
+            // which after a slow frame is long, then short: the moment drawn
+            // went back (kneadTick also keeps the canvas's from going back).
+            var lead = smoothFrameTime * 1000
+            if (!(lead > 4 && lead < 34)) lead = ms
+            var t = Math.max(card.clock + lead, card.lastDrawT)
             card.lastDrawT = t
-            card.kneadTick(t)
+            card.kneadTick(t, lead)
         }
     }
 
@@ -424,6 +536,16 @@ Item {
         // Left to right reads sigil → strip, like the buttons: → unrolls it.
         if (k === Qt.Key_Left || k === Qt.Key_H) { go(1); return true }
         if (k === Qt.Key_Right || k === Qt.Key_L) { go(0); return true }
+        // The number keys choose how the next kneads go (0: at random).
+        if (k >= Qt.Key_0 && k <= Qt.Key_9) {
+            var names = Sigil.modeNames(), n = k - Qt.Key_0
+            if (n === 0) modeLock = ""
+            else if (n <= names.length) modeLock = names[n - 1]
+            else return true
+            say = modeLock ? "Animation " + n + ": " + Sigil.modeOf(modeLock).title : "Animation: at random"
+            status = statusText(); sayDone.restart()
+            return true
+        }
         if (k === Qt.Key_Down || k === Qt.Key_J) { hi = (hi + 1) % Sigil.RINGS.length; status = statusText(); return true }
         if (k === Qt.Key_Up || k === Qt.Key_K) { hi = hi <= 0 ? Sigil.RINGS.length - 1 : hi - 1; status = statusText(); return true }
         return false
@@ -452,12 +574,44 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.space(14)
 
-                Text {
-                    text: ""
-                    font.family: "omarchy"
-                    font.pixelSize: Style.font.displayLarge + Style.space(12)
-                    color: Commons.Color.accent
+                // Omarchy's logo. The sigil's centre flies into it as the sigil
+                // bursts, and it pulses once as it lands.
+                Item {
+                    width: logo.implicitWidth
+                    height: logo.implicitHeight
                     anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        id: logo
+                        text: ""
+                        font.family: "omarchy"
+                        font.pixelSize: Style.font.displayLarge + Style.space(12)
+                        color: Commons.Color.accent
+                    }
+                    // The flash: the logo again in the foreground colour.
+                    Text {
+                        id: flash
+                        anchors.fill: logo
+                        scale: logo.scale
+                        text: logo.text
+                        font: logo.font
+                        color: card.fg
+                        opacity: 0
+                    }
+                    // Where the centre lands.
+                    Item { id: mark; anchors.centerIn: parent; width: 8; height: 8 }
+
+                    SequentialAnimation {
+                        id: pulse
+                        ParallelAnimation {
+                            NumberAnimation { target: logo; property: "scale"; to: 1.14; duration: 110; easing.type: Easing.OutQuad }
+                            NumberAnimation { target: flash; property: "opacity"; to: 0.7; duration: 110; easing.type: Easing.OutQuad }
+                        }
+                        ParallelAnimation {
+                            NumberAnimation { target: logo; property: "scale"; to: 1; duration: 520; easing.type: Easing.OutBack }
+                            NumberAnimation { target: flash; property: "opacity"; to: 0; duration: 420; easing.type: Easing.InQuad }
+                        }
+                    }
                 }
 
                 Column {
@@ -584,22 +738,31 @@ Item {
             // show only its top-left part).
             Canvas {
                 id: canvas
-                readonly property real dpr: Screen.devicePixelRatio || 1
+                readonly property real dpr: card.pxRatio
                 opacity: card.showCanvas ? card.canvasFade : 0
                 width: Math.max(1, Math.round(card.width * dpr))
                 height: Math.max(1, Math.round(card.height * dpr))
                 scale: 1 / dpr
                 transformOrigin: Item.TopLeft
-                renderStrategy: Canvas.Cooperative
+                // From the card's top, so the sigil's centre can fly up into
+                // the header's logo; the drawing still starts at the stage.
+                y: -stage.y
+                // Drawn in a thread of its own: in the GUI thread, recording a
+                // frame (~15 ms) and then drawing it (~10 ms) left ~26 frames a
+                // second on a real screen; this way the two overlap (~60).
+                renderStrategy: Canvas.Threaded
                 onPaint: {
                     var c = getContext("2d")
                     c.reset()
-                    if (!card.machine || !card.geo || !card.lastLayout) return
+                    if (!card.machine || !card.geo || !card.lastLayout || card.lastLayout.w < 100 || card.lastLayout.h < 100) return
                     c.scale(dpr, dpr)
-                    var st = card.state(card.frameT)
+                    c.translate(0, stage.y)
+                    var ct = card.canvasCur ? card.canvasT : card.frameT
+                    var st = card.state(ct)
+                    if (card.canvasCur) st.cur = card.canvasCur
                     st.markCache = card.markCache
                     if (card.occlude) st.bg = card.rgba(card.surface)
-                    Sigil.paint(c, card.lastLayout, card.frameT, st)
+                    Sigil.paint(c, card.lastLayout, ct, st)
                 }
                 // Painted (not just asked to paint): this frame replaces the
                 // layers. While layers for a new rest are still drawing they
@@ -625,6 +788,7 @@ Item {
                 readonly property real k: card.hi >= 0 ? card.cur[card.hi] : 0
                 readonly property real rowH: !lay ? 0 : Sigil.lerp(lay.rh, lay.ih, k)
                 visible: card.hi >= 0 && !!lay && !!card.machine
+                opacity: Sigil.hiDim(false, card.shape, 0)
                 x: !lay ? 0 : Sigil.lerp(4, lay.ix, k)
                 y: !lay || card.hi < 0 ? 0 : Sigil.lerp(lay.rowY[card.hi], lay.yI(Sigil.LIST_AT[card.hi]), k) - rowH / 2 + 1
                 width: !lay ? 0 : Sigil.lerp(lay.w - 8, lay.infoW - 10, k)
@@ -642,12 +806,17 @@ Item {
                 delegate: Text {
                     required property string modelData
                     readonly property var p: card.lastLayout ? Sigil.headPos(card.lastLayout, modelData, card.shape) : [0, 0]
+                    // In the list, drawn into the sigil as it winds up.
+                    readonly property var sk: card.lastLayout && card.shape > 0.5 ? Sigil.suckAt(card.lastLayout, card.listB, Sigil.suckHead(card.lastLayout, modelData, implicitWidth)) : null
                     visible: !!card.lastLayout && !!card.machine
-                    x: p[0]
-                    y: p[1] - height / 2
+                    x: sk ? sk.x - width / 2 : p[0]
+                    y: (sk ? sk.y : p[1]) - height / 2
+                    rotation: sk ? sk.rot : 0
+                    scale: sk ? sk.sc : 1
                     text: Sigil.CAT_NAME[modelData]
                     color: card.pal.cat[modelData]
-                    opacity: card.hi < 0 || Sigil.RINGS[card.hi].cat === modelData ? 1 : Sigil.DIM_TEXT
+                    opacity: Sigil.hiDim(card.hi < 0 || Sigil.RINGS[card.hi].cat === modelData, card.shape, Sigil.DIM_TEXT) * (sk ? sk.a : 1)
+                             * (card.lastLayout ? Sigil.wordAlpha(card.shape, card.lastLayout, "h:" + modelData, card.wordCtx) : 1)
                     font.family: card.fontName
                     font.pixelSize: Style.font.bodySmall
                     font.bold: true
@@ -656,6 +825,7 @@ Item {
 
             // Each ring's name and value: in the list (sigil) or along the row (strip).
             Repeater {
+                id: wordRep
                 model: Sigil.RINGS.length
                 delegate: Item {
                     id: row
@@ -666,41 +836,65 @@ Item {
                     readonly property var p: lay ? Sigil.textPos(lay, index, k, card.unit, Math.min(shortText.implicitWidth, card.valW)) : null
                     // Values never run past their column: the strip's value
                     // column, or the list's width.
-                    readonly property real room: lay ? Sigil.lerp(card.valW, lay.infoW - card.unit * 9.2 - 10, k) : 0
+                    readonly property real room: !lay ? 0 : k > 0.5 ? lay.infoW - card.unit * 9.2 - 10 : card.valW
                     readonly property bool isHi: card.hi === index
-                    readonly property real dim: card.hi < 0 || isHi ? 1 : Sigil.DIM_TEXT
+                    readonly property real dim: Sigil.hiDim(card.hi < 0 || isHi, card.shape, Sigil.DIM_TEXT) * (lay ? Sigil.wordAlpha(k, lay, index, card.wordCtx, "name") : 1)
+                    // The value lights after the name, as the row closes to its right end.
+                    readonly property real dimV: Sigil.hiDim(card.hi < 0 || isHi, card.shape, Sigil.DIM_TEXT) * (lay ? Sigil.wordAlpha(k, lay, index, card.wordCtx, "value") : 1)
+                    readonly property real nameW: nameText.implicitWidth
+                    readonly property real valW: longText.width
+                    // In the list, drawn into the sigil as it winds up: the
+                    // name (with its icon, on the canvas), then the value
+                    // (both of its value texts, together).
+                    readonly property bool sucked: !!p && k > 0.5
+                    readonly property var label: sucked ? Sigil.suckLabel(lay, index, nameW, valW) : null
+                    readonly property var value: sucked ? Sigil.suckValue(lay, index, nameW, valW) : null
+                    readonly property var skL: sucked && label ? Sigil.suckAt(lay, card.listB, label) : null
+                    readonly property var skN: skL ? Sigil.suckPart(skL, p.nameX + nameW / 2 - label.x, 0) : null
+                    readonly property var skW: sucked && value ? Sigil.suckAt(lay, card.listB, value) : null
+                    readonly property var skV: skW ? Sigil.suckPart(skW, p.valueX + valW / 2 - value.x, 0) : null
                     visible: !!p && !!card.machine
                     Text {
-                        x: row.p ? row.p.nameX : 0
-                        y: row.p ? row.p.y - height / 2 : 0
+                        id: nameText
+                        x: row.skN ? row.skN.x - width / 2 : row.p ? row.p.nameX : 0
+                        y: (row.skN ? row.skN.y : row.p ? row.p.y : 0) - height / 2
+                        rotation: row.skL ? row.skL.rot : 0
+                        scale: row.skL ? row.skL.sc : 1
                         text: Sigil.RINGS[row.index].name
                         color: row.isHi ? Commons.Color.menu.selectedText : card.pal.dim
-                        opacity: row.dim
+                        opacity: row.dim * (row.skL ? row.skL.a : 1)
                         font.family: card.fontName
                         font.pixelSize: Style.font.body
                         font.bold: row.isHi
                     }
                     Text {
                         id: shortText
-                        x: row.p ? row.p.valueX : 0
-                        y: row.p ? row.p.y - height / 2 : 0
+                        x: row.skV ? row.skV.x - width / 2 : row.p ? row.p.valueX : 0
+                        y: (row.skV ? row.skV.y : row.p ? row.p.yv : 0) - height / 2
+                        rotation: row.skW ? row.skW.rot : 0
+                        scale: row.skW ? row.skW.sc : 1
                         width: Math.min(implicitWidth, Math.max(0, row.room))
                         elide: Text.ElideRight
                         text: row.tx.s
                         color: card.fg
-                        opacity: row.dim * Sigil.clamp(1 - 2.2 * row.k, 0, 1)
+                        // (Each mode fades its values in and out itself: here they
+                        // only change place, halfway, where every mode has them out.)
+                        opacity: row.k < 0.5 ? row.dimV : 0
                         visible: opacity > 0.01
                         font.family: card.fontName
                         font.pixelSize: Style.font.body
                     }
                     Text {
-                        x: row.p ? row.p.valueX : 0
-                        y: row.p ? row.p.y - height / 2 : 0
+                        id: longText
+                        x: row.skV ? row.skV.x - width / 2 : row.p ? row.p.valueX : 0
+                        y: (row.skV ? row.skV.y : row.p ? row.p.yv : 0) - height / 2
+                        rotation: row.skW ? row.skW.rot : 0
+                        scale: row.skW ? row.skW.sc : 1
                         width: Math.min(implicitWidth, Math.max(0, row.room))
                         elide: Text.ElideRight
                         text: row.tx.l
                         color: card.fg
-                        opacity: row.dim * Sigil.clamp(2.2 * row.k - 1.2, 0, 1)
+                        opacity: row.k > 0.5 ? row.dimV * (row.skW ? row.skW.a : 1) : 0
                         visible: opacity > 0.01
                         font.family: card.fontName
                         font.pixelSize: Style.font.body
@@ -726,13 +920,11 @@ Item {
                     if (card.drag) {
                         var dx = mouse.x - card.drag.x
                         if (!card.drag.moved && Math.abs(dx) > 5 && Math.abs(dx) > Math.abs(mouse.y - card.drag.y)) card.drag.moved = true
+                        // A drag towards the other shape (right from the sigil,
+                        // left from the strip) just starts that knead.
                         if (card.drag.moved) {
-                            card.anim = null
-                            card.dragging = true
-                            // Dragging right unrolls the sigil into the strip.
-                            var s = Sigil.clamp(card.drag.s0 - dx / 240, 0, 1)
-                            card.cur = Sigil.RINGS.map(function() { return s })
-                            card.target = Math.round(s)
+                            var to = card.drag.s0 < 0.5 ? 1 : 0
+                            if (to === 1 ? dx < 0 : dx > 0) { card.drag = null; card.go(to) }
                             return
                         }
                     }
@@ -743,17 +935,11 @@ Item {
                 }
                 onReleased: {
                     var d = card.drag
-                    card.drag = null; card.dragging = false
-                    if (!d) return
-                    if (d.moved) card.settle()
-                    else card.go(1 - card.target)
+                    card.drag = null
+                    // (A drag that never went the other shape's way does nothing.)
+                    if (d && !d.moved) card.go(1 - card.target)
                 }
-                // Cancelled mid-drag (e.g. the pointer is taken away): settle too.
-                onCanceled: {
-                    var d = card.drag
-                    card.drag = null; card.dragging = false
-                    if (d && d.moved) card.settle()
-                }
+                onCanceled: card.drag = null
                 onExited: if (!card.drag && card.hi >= 0) { card.hi = -1; card.status = card.statusText() }
             }
         }
@@ -817,7 +1003,7 @@ Item {
         function redraw(gen) { if (gen) askedGen = gen; wanted = true; cv.requestPaint() }
         Canvas {
             id: cv
-            readonly property real dpr: Screen.devicePixelRatio || 1
+            readonly property real dpr: card.pxRatio
             width: layerItem.wanted ? Math.max(1, Math.round(layerItem.width * dpr)) : 1
             height: layerItem.wanted ? Math.max(1, Math.round(layerItem.height * dpr)) : 1
             scale: 1 / dpr

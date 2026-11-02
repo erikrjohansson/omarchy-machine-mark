@@ -1,6 +1,6 @@
 # Machine Mark
 
-Omarchy's About window as a sigil drawn from your machine's real specs, every mark made of round dots. Every ring is one fact about the computer, and you can knead the whole thing into a strip of rows and back.
+Omarchy's About window as a sigil drawn from your machine's real specs, every mark made of round dots. Every ring is one fact about the computer, and you can knead the whole thing into a strip of rows and back, a different way each time: it bursts, weaves, reels, spins like a coin, rings out like a harp or breaks like a cue ball.
 
 ![Machine Mark's sigil in the Cobalt Dunes theme, with the list of facts beside it](preview.png)
 
@@ -47,6 +47,7 @@ If you added the About line to `~/.config/omarchy/extensions/omarchy-menu.jsonc`
 | Drag sideways, click, <kbd>Space</kbd> | knead between sigil and strip |
 | <kbd>←</kbd> <kbd>→</kbd> | sigil / strip (drag right to unroll the sigil into the strip) |
 | <kbd>↑</kbd> <kbd>↓</kbd>, hover | pick a ring; the footer shows a detail about it |
+| <kbd>1</kbd>–<kbd>6</kbd>, <kbd>0</kbd> | keep to one way of kneading; 0 for a random one each time again |
 | <kbd>Esc</kbd>, <kbd>Super</kbd> + <kbd>W</kbd> | close |
 
 ## What it reads
