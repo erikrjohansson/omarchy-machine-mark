@@ -284,9 +284,10 @@ function partsOf(Y, t, s) {
 // ------------------------------------------------------------------- frames
 
 // Per ring, this frame: its turn, how far it has paid out, and its belt.
-var nR = S.RINGS.length
-var RCS = new Float64Array(nR + 1), RSN = new Float64Array(nR + 1), RDL = new Float64Array(nR + 1)
-var RP = new Float64Array(nR), RV = new Float64Array(nR), RFT = new Float64Array(nR), RRL = new Float64Array(nR), RAL = new Float64Array(nR)
+// (nR follows the rings: see reset.)
+var nR = S.RINGS.length, MR = S.MAX_RINGS
+var RCS = new Float64Array(MR + 1), RSN = new Float64Array(MR + 1), RDL = new Float64Array(MR + 1)
+var RP = new Float64Array(MR), RV = new Float64Array(MR), RFT = new Float64Array(MR), RRL = new Float64Array(MR), RAL = new Float64Array(MR)
 
 // Ring i's turn at ms (turns) and its rate (turns per ms). A: where it
 // points at rest (out: as the knead starts; back: as it ends), sg: +1 out,
@@ -465,5 +466,7 @@ S.register("spool", {
     wordAlpha: spoolWordAlpha,
     listB: function(b, back) { return b * T / T_MS },
     corePulse: function(Y, mark) { return planOf(Y, mark).pulse },
-    pulseBack: true
+    pulseBack: true,
+    // (The displays changed: the rows did, and how many rings there are.)
+    reset: function() { PLAN = { key: "" }; nR = S.RINGS.length }
 })

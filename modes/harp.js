@@ -337,7 +337,7 @@ function softEdge(v, hi) {
     return v
 }
 
-var RA = new Float32Array(S.RINGS.length + 2), WO = new Float32Array(3), CO = {}, CP = {}
+var RA = new Float32Array(S.MAX_RINGS + 2), WO = new Float32Array(3), CO = {}, CP = {}
 
 function ringsAlpha(t, s, shape, H) {
     for (var i = 0; i < H.nR; i++)
@@ -520,5 +520,7 @@ S.register("harp", {
     wordAlpha: wordAlpha,
     listB: listB,
     corePulse: function(Y, mark) { return (CORE_OUT[0] + PULSE_TAU * (CORE_OUT[1] - CORE_OUT[0])) / T_OUT },
-    pulseBack: true
+    pulseBack: true,
+    // (The displays changed: the rows did.)
+    reset: function() { FALLW = { key: "" }; PLUCK = { key: "" }; LIT = { key: "" } }
 })

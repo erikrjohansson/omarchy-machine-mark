@@ -354,7 +354,7 @@ function backFlight(C, f, k, ring) {
 
 // ------------------------------------------------------------------- paint
 
-var RC = new Float32Array(S.RINGS.length + 1), RS = new Float32Array(S.RINGS.length + 1), RA = new Float32Array(S.RINGS.length + 1)
+var RC = new Float32Array(S.MAX_RINGS + 1), RS = new Float32Array(S.MAX_RINGS + 1), RA = new Float32Array(S.MAX_RINGS + 1)
 var WO = new Float32Array(3)
 
 // The rings' turns (the rest drift) and their alphas.
@@ -550,13 +550,12 @@ function paintBack(c, Y, t, s) {
 // head with its section's first row. Back: the strip's words go out in
 // place (the heads first: the core drops past them); the list is thrown
 // out from the rim (listB).
-var FIRST = { age: 13, sw: 10, hw: 5 }
 function wordAlpha(k, Y, id, w, part) {
     var back = !!(w && w.back), head = typeof id === "string"
     if (k > 0.5) return back ? 1 : 1 - smooth((1 - k) * T_OUT / LIST_FADE)
     if (back) return 1 - smooth(k * T_R / (head ? HEAD_OUT : WORD_OUT))
     var ms = (1 - k) * T_OUT, fin = smooth((ms - FINAL[0]) / (FINAL[1] - FINAL[0]))
-    var row = head ? FIRST[id.slice(2)] : id
+    var row = head ? S.firstOf(id.slice(2)) : id
     var te = ZIP0 + ZIP_STAG * S.LIST_AT[row] - 250 + (part === "value" ? ZIP_SWEEP : 0)
     return Math.max(fin, smooth((ms - te) / WORD_FADE))
 }
@@ -586,5 +585,7 @@ S.register("breakshot", {
     wordAlpha: wordAlpha,
     listB: listB,
     corePulse: function(Y, mark) { return (T_HIT + PULSE_TAU * CORE_BACK) / T_OUT },
-    pulseBack: true
+    pulseBack: true,
+    // (The displays changed: the rows did.)
+    reset: function() { PLAN = { key: "" } }
 })

@@ -340,7 +340,7 @@ function backFlight(C, f, tt, ring, tw) {
 
 // ------------------------------------------------------------------- paint
 
-var RC = new Float32Array(S.RINGS.length + 1), RS = new Float32Array(S.RINGS.length + 1), RA = new Float32Array(S.RINGS.length + 1)
+var RC = new Float32Array(S.MAX_RINGS + 1), RS = new Float32Array(S.MAX_RINGS + 1), RA = new Float32Array(S.MAX_RINGS + 1)
 var WO = new Float32Array(3)
 
 // The rings' turns in their plane (the rest drift) and their alphas.
@@ -535,7 +535,6 @@ function paintBack(c, Y, t, s) {
 // from the middle out, so both near the end), a head with its section's
 // first row. Back: the strip's words go out in place, each before the
 // core can reach it; the list is thrown out from the rim (listB).
-var FIRST = { age: 13, sw: 10, hw: 5 }
 var CROSS = { key: "" }
 function crossOf(Y, mark) {
     var m = mark || { x: 30, y: -30 }, key = [Y.w, Y.h, Y.cx, Y.cy, Y.R, Y.rh, m.x, m.y].join()
@@ -558,7 +557,7 @@ function wordAlpha(k, Y, id, w, part) {
         return 1 - smooth(k * T_R / clamp(tc - 20, 80, WORD_OUT))
     }
     var ms = (1 - k) * T_OUT, fin = smooth((ms - FINAL[0]) / (FINAL[1] - FINAL[0]))
-    var row = head ? FIRST[id.slice(2)] : id, ord = 0
+    var row = head ? S.firstOf(id.slice(2)) : id, ord = 0
     for (var i = 0; i < Y.rowY.length; i++) if (Y.rowY[i] < Y.rowY[row]) ord++
     return Math.max(fin, smooth((ms - WORD0 - WORD_STAG * ord - (part === "value" ? VALUE_LAG : 0)) / WORD_IN))
 }
@@ -587,5 +586,7 @@ S.register("coin", {
     wordAlpha: wordAlpha,
     listB: listB,
     corePulse: function(Y, mark) { return (CORE_OUT[0] + PULSE_TAU * (CORE_OUT[1] - CORE_OUT[0])) / T_OUT },
-    pulseBack: true
+    pulseBack: true,
+    // (The displays changed: the rows did.)
+    reset: function() { CROSS = { key: "" } }
 })

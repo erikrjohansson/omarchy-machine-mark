@@ -61,12 +61,20 @@ function smin(a, b, k) {
 }
 function smax(a, b, k) { return -smin(-a, -b, k) }
 
-// The lanes: [lower ring, upper ring, y, direction].
+// The lanes: [lower ring, upper ring, y, direction]; of[i]: ring i's lane.
+// Two rings a lane from the bottom; the way starts heading right and the
+// top lane must end at the right too, so there is an odd number of them:
+// where that leaves rings over, the top lanes take one ring each.
 function lanes(Y) {
-    var out = []
-    for (var p = 0; p < 7; p++) {
-        var a = 2 * p, b = 2 * p + 1
+    var out = [], n = S.RINGS.length, nL = Math.ceil(n / 2)
+    if (nL % 2 === 0) nL++
+    var pairs = n - nL, a = 0
+    out.of = []
+    for (var p = 0; p < nL; p++) {
+        var b = p < pairs ? a + 1 : a
         out.push({ lo: a, hi: b, y: (Y.rowY[a] + Y.rowY[b]) / 2, dir: p % 2 ? -1 : 1 })
+        out.of[a] = p; out.of[b] = p
+        a = b + 1
     }
     return out
 }
@@ -248,7 +256,7 @@ function buildWay(Y, m, key) {
     // light: its row whole (a head: the rows next to it), the core clear of
     // it for good, not before the strip's words show (half way), and the
     // rows that would light at once at that point staggered from the bottom.
-    var close = new Float32Array(14)
+    var nR = S.RINGS.length, close = new Float32Array(nR)
     for (p = 0; p < L.length; p++) {
         var tEnd = (L[p].dir > 0 ? W.lay[p][M_LAY] : W.lay[p][0]) + G
         close[L[p].lo] = tEnd; close[L[p].hi] = tEnd
@@ -265,7 +273,7 @@ function buildWay(Y, m, key) {
         return last
     }
     var half = T_OUT / 2 + 20, lit = {}, early = []
-    for (i = 0; i < 14; i++) {
+    for (i = 0; i < nR; i++) {
         var y = Y.rowY[i]
         var tn = Math.max(close[i], clearOf(Y.x0, Y.tx0 - 3, y - 9, y + 9))
         var tv = Math.max(close[i], clearOf(Y.tx1 + 3, Y.xv, y - 9, y + 9))
@@ -275,7 +283,7 @@ function buildWay(Y, m, key) {
     var heads = ["hw", "sw", "age"]
     heads.forEach(function(cat) {
         var y = Y.heads[cat], tc = 0
-        for (var r = 0; r < 14; r++) if (Math.abs(Y.rowY[r] - y) < 1.05 * Y.rh) tc = Math.max(tc, close[r])
+        for (var r = 0; r < nR; r++) if (Math.abs(Y.rowY[r] - y) < 1.05 * Y.rh) tc = Math.max(tc, close[r])
         lit["h:" + cat] = [Math.max(tc, clearOf(Y.x0, Y.xv, y - 9, y + 9))]
     })
     // (Bottom-up, the rows waiting for half way.)
@@ -283,7 +291,7 @@ function buildWay(Y, m, key) {
     early.forEach(function(i, k) { lit[i][0] = Math.max(lit[i][0], half + WORD_STAG * k) })
     // (Never before the row below: the strip lights bottom-up.)
     var order = []
-    for (i = 0; i < 14; i++) order.push(i)
+    for (i = 0; i < nR; i++) order.push(i)
     order.sort(function(a, b) { return Y.rowY[b] - Y.rowY[a] })
     for (var oi = 1; oi < order.length; oi++) lit[order[oi]][0] = Math.max(lit[order[oi]][0], lit[order[oi - 1]][0] + WORD_STAG)
     for (var id in lit) {
@@ -475,7 +483,7 @@ function ringTurn(R, W, t, o) {
 var FW = [0, 0], FS = [0, 0]
 function flightWork(Q, Y, pt, budget) {
     var W = Q.W, until = Date.now() + budget, TAU = S.TAU, o2 = FW, sp = FS
-    while (Q.next < 7) {
+    while (Q.next < Q.order.length) {
         var p = Q.order[Q.next], list = Q.byPass[p]
         var need = Q.back ? pt <= Q.maxArr[p] + 500 : pt >= Q.minDep[p] - 500
         while (Q.at < list.length) {
@@ -508,7 +516,7 @@ function planOf(Y, t, s) {
     // their angles at T_OUT (the coda turns on at their rest rate).
     var rings = []
     for (var i = 0; i < RINGS.length; i++) {
-        var p = i >> 1, ln = L[p], rate = S.layerRate(i, s)
+        var p = L.of[i], ln = L[p], rate = S.layerRate(i, s)
         var base = back ? S.restTurns(i, t0 + T_OUT, s) : S.restTurns(i, t0, s)
         var R = { p: p, dir: ln.dir, rate: rate, sign: back ? -1 : 1, base: base }
         // Its dots go from u = 0 (left to right) or 1; the first when.
@@ -551,19 +559,19 @@ function planOf(Y, t, s) {
               rings: rings, W: W, back: back, t0: t0 }
     // (Their times now; their flights pass by pass, the next needed
     // first, over the knead's first frames: see flightWork.)
-    var byPass = [[], [], [], [], [], [], []], minDep = [], maxArr = []
+    var byPass = L.map(function() { return [] }), minDep = [], maxArr = []
     for (var k = 0; k < n; k++) {
         var q = list[k], ring = q.ring
         Q.ring[k] = ring; Q.style[k] = q.style; Q.flags[k] = q.flags
         Q.lx[k] = q.lx; Q.ly[k] = q.ly; Q.tx[k] = q.tx; Q.ty[k] = q.ty; Q.rc[k] = q.rc; Q.rl[k] = q.rl
         if (ring < 0) { Q.tdep[k] = Infinity; Q.tlay[k] = Infinity; Q.tarr[k] = Infinity; continue }
-        var pp = ring >> 1, tl = layAt(W, pp, q.tx, Y), td = layAt(W, pp, q.tx, Y, W.dep[pp])
+        var pp = L.of[ring], tl = layAt(W, pp, q.tx, Y), td = layAt(W, pp, q.tx, Y, W.dep[pp])
         Q.tlay[k] = tl; Q.tdep[k] = td; Q.tarr[k] = tl + G
         byPass[pp].push(k)
         minDep[pp] = Math.min(minDep[pp] === undefined ? Infinity : minDep[pp], td); maxArr[pp] = Math.max(maxArr[pp] || 0, tl + G)
     }
     Q.byPass = byPass; Q.minDep = minDep; Q.maxArr = maxArr
-    Q.order = back ? [6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6]; Q.next = 0; Q.at = 0
+    Q.order = L.map(function(ln, p) { return back ? L.length - 1 - p : p }); Q.next = 0; Q.at = 0
     flightWork(Q, Y, back ? T_OUT : 0, 0)
     mc[key] = Q
     return Q
@@ -655,12 +663,13 @@ var part = (function() {
     else { var h = r * (r > BEAD_SQ ? 0.841 : 0.886); c.fillRect(x - h, y - h, 2 * h, 2 * h) }
 }})()
 
-var RW = new Float32Array(15), RC = new Float32Array(15), RS = new Float32Array(15), RCp = new Float32Array(15), RSp = new Float32Array(15), RAl = new Float32Array(15)
+var MR = S.MAX_RINGS + 1
+var RW = new Float32Array(MR), RC = new Float32Array(MR), RS = new Float32Array(MR), RCp = new Float32Array(MR), RSp = new Float32Array(MR), RAl = new Float32Array(MR)
 var LPS = new Float32Array(4), LT = [0, 0], RT = [0, 0], SPN = [0, 0], SPP = [0, 0]
 function paint(c, Y, t, s) {
     if (!Y || Y.w < 100 || Y.h < 100) return
     var Q = planOf(Y, t, s), W = Q.W, back = !!s.back, shape = S.clamp(average(s.cur), 0, 1)
-    if (Q.next < 7) flightWork(Q, Y, back ? Math.max(0, T_OUT - shape * T_R) : (1 - shape) * T_OUT, 2)
+    if (Q.next < Q.order.length) flightWork(Q, Y, back ? Math.max(0, T_OUT - shape * T_R) : (1 - shape) * T_OUT, 2)
     var _RC = RC, _RS = RS, _RCp = RCp, _RSp = RSp, _RAl = RAl, _RW = RW, TAU = S.TAU, nR = S.RINGS.length
     // Plan time: out, the knead's ms; back, the out's run backwards, then the coda.
     var ms = back ? shape * T_R : (1 - shape) * T_OUT, pt = back ? Math.max(0, T_OUT - ms) : ms
@@ -853,5 +862,7 @@ S.register("loom", {
     wordAlpha: wordAlpha,
     listB: listB,
     corePulse: corePulse,
-    pulseBack: true
+    pulseBack: true,
+    // (The displays changed: the rows and lanes did.)
+    reset: function() { WAYS = {}; WAY_N = 0 }
 })

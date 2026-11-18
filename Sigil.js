@@ -76,7 +76,10 @@ var CATS = ["hw", "sw", "age"]
 var DIM_RING = 0.35
 var DIM_TEXT = 0.6
 var CAT_NAME = { hw: "Hardware", sw: "Software", age: "Age / Uptime" }
-var RINGS = [
+// The rings for one display. Each display gets a Display ring of its own
+// (setRings), as does a battery, so RINGS, RK, LIST and LIST_AT change in place: every file
+// that holds them sees the change.
+var BASE_RINGS = [
     { k: "cores",   cat: "hw",  name: "CPU",      r: [0.03, 0.12] },
     { k: "threads", cat: "hw",  name: "Threads",  r: [0.13, 0.25] },
     { k: "gpu",     cat: "hw",  name: "GPU",      r: [0.26, 0.30] },
@@ -92,8 +95,90 @@ var RINGS = [
     { k: "since",   cat: "age", name: "Updated",  r: [0.88, 0.915], fixed: true },
     { k: "up",      cat: "age", name: "Uptime",   r: [0.925, 0.995], fixed: true }
 ]
-var RK = {}
-RINGS.forEach(function(r, i) { RK[r.k] = i })
+var MAX_DISPLAYS = 8
+// The most rings there can be: the frames' per-ring tables are this long.
+var MAX_RINGS = BASE_RINGS.length - 1 + MAX_DISPLAYS + 1   // (+1: the battery)
+var RINGS = [], RK = {}
+
+// Display n (from 0) is ring "hz", "hz2", "hz3"…; -1 for any other ring.
+function dispOf(k) {
+    var m = /^hz(\d*)$/.exec(k)
+    return m ? (m[1] ? +m[1] - 1 : 0) : -1
+}
+// The displays the helper read (older readings had only one).
+function displaysOf(m) {
+    if (m && m.displays && m.displays.length) return m.displays
+    return m && m.display && m.display.width ? [m.display] : []
+}
+
+// The battery's ring, on machines with one: in the age section, after the
+// OS age (how the machine itself has aged), as wide as the Memory ring.
+var BATTERY_RING = { k: "batt", cat: "age", name: "Battery", after: "age", w: 0.035 }
+
+// The rings for this machine: one Display ring per display (at least one,
+// at most MAX_DISPLAYS), the first outermost, so the list reads them in
+// order; and a Battery ring if it has a battery. A section with rings added
+// fits them into the room it had without them, every ring and gap in
+// proportion. True if the rings changed: everything worked out per ring is
+// then out of date (the card starts afresh, and the modes forget their
+// plans: reset).
+function setRings(nDisplays, battery) {
+    var n = clamp(Math.round(nDisplays) || 1, 1, MAX_DISPLAYS), withBatt = !!battery
+    var have = 0
+    for (var i = 0; i < RINGS.length; i++) if (dispOf(RINGS[i].k) >= 0) have++
+    if (RINGS.length && have === n && (RK.batt !== undefined) === withBatt) return false
+    var out = []
+    BASE_RINGS.forEach(function(r) {
+        if (r.k !== "hz") out.push({ k: r.k, cat: r.cat, name: r.name, r: r.r.slice(), fixed: r.fixed })
+        else for (var d = n - 1; d >= 0; d--)
+            out.push({ k: d ? "hz" + (d + 1) : "hz", cat: r.cat, name: n > 1 ? r.name + " " + (d + 1) : r.name, r: r.r.slice() })
+        if (withBatt && r.k === BATTERY_RING.after)
+            out.push({ k: BATTERY_RING.k, cat: BATTERY_RING.cat, name: BATTERY_RING.name, r: [0, BATTERY_RING.w] })
+    })
+    // (The ring of one display a ring stands in for, for its gaps: a
+    // display's is the first's, the battery's the OS age's.)
+    var baseKey = function(k) { return dispOf(k) >= 0 ? "hz" : k === BATTERY_RING.k ? BATTERY_RING.after : k }
+    CATS.forEach(function(cat) {
+        var rs = out.filter(function(r) { return r.cat === cat }), base = BASE_RINGS.filter(function(r) { return r.cat === cat })
+        if (rs.length === base.length) return
+        // The gap after a ring: the one after the ring it stands in for (the
+        // one before it, for the section's last).
+        var gapAfter = function(k) {
+            k = baseKey(k)
+            for (var j = 0; j < base.length; j++) if (base[j].k === k)
+                return j + 1 < base.length ? base[j + 1].r[0] - base[j].r[1] : base[j].r[0] - base[j - 1].r[1]
+            return 0
+        }
+        var lo = base[0].r[0], hiR = base[base.length - 1].r[1], total = 0
+        rs.forEach(function(r, j) { total += r.r[1] - r.r[0] + (j < rs.length - 1 ? gapAfter(r.k) : 0) })
+        var sc = (hiR - lo) / total, x = lo
+        rs.forEach(function(r, j) {
+            var w = (r.r[1] - r.r[0]) * sc
+            r.r = [x, x + w]
+            x += w + (j < rs.length - 1 ? gapAfter(r.k) * sc : 0)
+        })
+    })
+    RINGS.length = 0
+    out.forEach(function(r) { RINGS.push(r) })
+    for (var k in RK) delete RK[k]
+    RINGS.forEach(function(r, j) { RK[r.k] = j })
+    LIST.length = 0
+    var cat = ""
+    for (i = RINGS.length - 1; i >= 0; i--) {
+        if (RINGS[i].cat !== cat) { cat = RINGS[i].cat; LIST.push({ head: cat }) }
+        LIST.push({ i: i })
+    }
+    for (k in LIST_AT) delete LIST_AT[k]
+    LIST.forEach(function(e, j) { if (e.head) LIST_AT["h:" + e.head] = j; else LIST_AT[e.i] = j })
+    // What was worked out for the old rings.
+    CORE_PLAN = { key: "" }; CORE_TIMES = { key: "" }; PLANS = {}; PLAN_N = 0
+    for (var name in MODES) if (MODES[name].reset) MODES[name].reset()
+    return true
+}
+// The rings a reading asks for.
+function setRingsFor(m) { return setRings(displaysOf(m).length, m && m.battery && m.battery.health > 0) }
+// A section's first row in the list (the ring its head stands over).
+function firstOf(cat) { return LIST[LIST_AT["h:" + cat] + 1].i }
 // Thin dividers between the sections, in the sigil only.
 var SEPS = [["hw", 0.49], ["sw", 0.812]]
 
@@ -134,7 +219,13 @@ function facts(m, elapsed) {
     f.sinceH = m.lastUpgrade > 0 ? Math.max(0, (now - m.lastUpgrade) / 3600) : -1
     f.mem = m.memory.total > 0 ? (m.memory.used || 0) / m.memory.total : 0
     f.disk = m.disk.total > 0 ? (m.disk.used || 0) / m.disk.total : 0
-    f.pulses = m.display.hz > 0 ? Math.max(1, Math.round(m.display.hz / 10)) : 0
+    // The battery's health, what it holds against what it held new (0: no
+    // battery). A new one can hold a little more than its design.
+    f.batt = m.battery && m.battery.health > 0 ? m.battery.health : 0
+    // Each display's pulses (pulses: the first's).
+    f.displays = displaysOf(m)
+    f.pulsesD = f.displays.map(function(d) { return d.hz > 0 ? Math.max(1, Math.round(d.hz / 10)) : 0 })
+    f.pulses = f.pulsesD[0] || 0
     f.gpuUnit = m.gpu.cores ? GPU_UNITS[m.gpu.driver] || null : null
     f.gpuBy = f.gpuUnit ? "cores" : m.gpu.vram ? "vram" : ""
     f.squares = f.gpuUnit ? Math.max(1, Math.round(m.gpu.cores / f.gpuUnit.per)) : m.gpu.vram ? Math.round(m.gpu.vram / GIB) : 0
@@ -196,6 +287,28 @@ function resShort(d) {
 }
 
 var UNKNOWN = "unknown"
+// Everything the window shows, as plain text for the clipboard (the Copy
+// button): the header, then each section's rows as the list has them, top
+// down, names lined up. A display's row names the display too.
+function report(m, f, themeName) {
+    var lines = [], w = 0
+    lines.push(m.host + (m.model ? " (" + m.model + ")" : ""))
+    var os = "Omarchy" + (m.os.version ? " " + m.os.version : "") + (m.os.channel ? ", " + m.os.channel + " channel" : "")
+    if (m.kernel) os += ", Linux " + m.kernel
+    if (m.wm.name) os += ", " + m.wm.name + (m.wm.version ? " " + m.wm.version : "")
+    lines.push(os)
+    RINGS.forEach(function(r) { w = Math.max(w, r.name.length) })
+    LIST.forEach(function(e) {
+        if (e.head) { lines.push(""); lines.push(CAT_NAME[e.head]); return }
+        var r = RINGS[e.i], v = fact(r.k, m, f, themeName).l
+        if (dispOf(r.k) >= 0 && displayOf(r.k, f).name) v += " (" + displayOf(r.k, f).name + ")"
+        var name = r.name
+        while (name.length < w) name += " "
+        lines.push("  " + name + "  " + v)
+    })
+    return lines.join("\n") + "\n"
+}
+
 // One row per ring: s = the strip's short value, l = the list's plain fact,
 // how = the footer's line on hover (say).
 function text(k, m, f, themeName) {
@@ -203,8 +316,11 @@ function text(k, m, f, themeName) {
     t.how = say(k, m, f, themeName)
     return t
 }
+// A Display ring's display (an empty one if it wasn't reported).
+function displayOf(k, f) { return f.displays[Math.max(0, dispOf(k))] || {} }
 function fact(k, m, f, themeName) {
-    var hz = Math.round(m.display.hz || 0), none = { s: UNKNOWN, l: UNKNOWN }
+    var dsp = displayOf(k, f), hz = Math.round(dsp.hz || 0), none = { s: UNKNOWN, l: UNKNOWN }
+    if (dispOf(k) >= 0) k = "hz"
     switch (k) {
     case "cores":
         if (!m.cpu.cores) return { s: UNKNOWN, l: m.cpu.name || UNKNOWN }
@@ -222,11 +338,16 @@ function fact(k, m, f, themeName) {
                  l: ((m.memory.used || 0) / GIB).toFixed(1) + " / " + (m.memory.total / GIB).toFixed(1) + " GiB" }
     case "disk":
         if (!m.disk.total) return none
-        var used = m.disk.used || 0, usedText = used / GIB >= 1000 ? (used / GIB / 1024).toFixed(2) + " TiB" : Math.round(used / GIB) + " GiB"
-        return { s: sizeShort(used) + " / " + sizeShort(m.disk.total), l: usedText + " / " + size(m.disk.total).replace(/\.00 /, " ") }
+        // (Whole GiB, a big disk too: "1,860 GiB / 3,726 GiB".)
+        var used = m.disk.used || 0, gib = function(b) { return num(b / GIB) + " GiB" }
+        return { s: sizeShort(used) + " / " + sizeShort(m.disk.total), l: gib(used) + " / " + gib(m.disk.total) }
+    case "batt":
+        if (!f.batt) return none
+        var bp = Math.round(f.batt * 100) + "%", b = m.battery
+        return { s: bp + " health", l: b.wh && b.designWh ? b.wh.toFixed(1) + " / " + b.designWh.toFixed(1) + " Wh (" + bp + ")" : bp + " of new" }
     case "hz":
-        if (!m.display.width || !hz) return none
-        return { s: resShort(m.display) + " · " + hz + " Hz", l: m.display.width + "×" + m.display.height + " @ " + hz + " Hz" }
+        if (!dsp.width || !hz) return none
+        return { s: resShort(dsp) + " · " + hz + " Hz", l: dsp.width + "×" + dsp.height + " @ " + hz + " Hz" }
     case "pkgs":
         if (m.packages.pacman === null || m.packages.pacman === undefined) return none
         return { s: num(m.packages.pacman) + " pkgs", l: num(m.packages.pacman) }
@@ -257,6 +378,8 @@ function fact(k, m, f, themeName) {
 // in two short sentences.
 function say(k, m, f, themeName) {
     var pct = function(x) { return Math.round(x * 100) + "%" }
+    var dsp = displayOf(k, f)
+    if (dispOf(k) >= 0) k = "hz"
     switch (k) {
     case "cores":
         if (!m.cpu.cores) return "The CPU didn't report its cores."
@@ -275,9 +398,16 @@ function say(k, m, f, themeName) {
     case "disk":
         if (!m.disk.total) return "The root disk wasn't reported."
         return "Your disk is " + pct(f.disk) + " full" + (m.disk.fs ? " (" + m.disk.fs + ")" : "") + ". The large dots show how much is used."
+    case "batt":
+        if (!f.batt) return "The battery wasn't reported."
+        var bt = m.battery
+        return "Your battery holds " + pct(f.batt) + " of what it held new" + (bt.wh && bt.designWh ? " (" + bt.wh.toFixed(1) + " of " + bt.designWh.toFixed(1) + " Wh)" : "")
+            + (bt.cycles ? ", after " + num(bt.cycles) + " charge cycles" : "") + ". The large dots fill as far as it still holds."
     case "hz":
-        if (!m.display.hz) return "The display wasn't reported."
-        return "Your " + (m.display.inches ? Math.round(m.display.inches) + "″ " : "") + "display runs at " + Math.round(m.display.hz) + " Hz. Each pulse in the wave is 10 Hz."
+        if (!dsp.hz) return "The display wasn't reported."
+        // (With several, which one: its name, and built in or not.)
+        var which = f.displays.length > 1 && dsp.name ? (dsp.type === "Builtin" ? "built-in " + dsp.name + " display" : dsp.name) : "display"
+        return "Your " + (dsp.inches ? Math.round(dsp.inches) + "″ " : "") + which + " runs at " + Math.round(dsp.hz) + " Hz. Each pulse in the wave is 10 Hz."
     case "pkgs":
         if (m.packages.pacman === null || m.packages.pacman === undefined) return "Packages weren't reported."
         return "You have " + num(m.packages.pacman) + " pacman packages" + (m.packages.other ? " and " + num(m.packages.other) + " others" : "") + ". "
@@ -315,9 +445,21 @@ function say(k, m, f, themeName) {
 // The seed: same hostname and hardware, same shape.
 function geometry(m) {
     var f = facts(m, 0)
-    var r = rng(hashStr([m.host, m.cpu.name, m.gpu.name, m.installed].join("|")))
+    var seed = [m.host, m.cpu.name, m.gpu.name, m.installed].join("|"), r = rng(hashStr(seed))
     var arr = function(n) { var a = []; for (var i = 0; i < n; i++) a.push(r()); return a }
-    var off = arr(RINGS.length)
+    // Each ring's angle: drawn for the rings of one display, so a display
+    // more or less leaves the rest of the shape as it was; the displays
+    // after the first get theirs from a seed of their own.
+    var base = arr(BASE_RINGS.length), r2 = rng(hashStr(seed + "|displays")), more = []
+    for (var d = 1; d < MAX_DISPLAYS; d++) more.push(r2())
+    var batt = r2()
+    var off = RINGS.map(function(ring) {
+        var dn = dispOf(ring.k)
+        if (dn > 0) return more[dn - 1]
+        if (ring.k === BATTERY_RING.k) return batt
+        for (var j = 0; j < BASE_RINGS.length; j++) if (BASE_RINGS[j].k === ring.k) return base[j]
+        return 0
+    })
     var g = {
         offC: off,
         spoke: arr(Math.max(1, f.lines.threads)), tick: arr(f.lines.pkgs),
@@ -367,7 +509,8 @@ function marks(k, s) {
     var m = s.machine, f = s.facts, g = s.geo, pal = s.pal, C = ringColor(k, pal), out = []
     // Faint marks are stronger on a light background (see the end).
     var track = alpha(pal.dim, pal.light ? 0.9 : 0.55), faint = alpha(pal.dim, pal.light ? 1 : 0.8)
-    var i, j, n
+    var i, j, n, pulses = f.pulsesD[Math.max(0, dispOf(k))] || 0
+    if (dispOf(k) >= 0) k = "hz"
     switch (k) {
     case "cores":
         n = f.lines.cores
@@ -391,16 +534,16 @@ function marks(k, s) {
         var sz = clamp(1.3 * Math.sqrt(68 / Math.max(1, n)), 0.95, 2.6)
         for (j = 0; j < n; j++) out.push({ d: "dot", u: (j + 0.5) / n, w: 0, s: sz, col: C })
         break
-    case "mem": case "disk":
-        var fill = k === "mem" ? f.mem : f.disk
+    case "mem": case "disk": case "batt":
+        var fill = Math.min(1, k === "mem" ? f.mem : k === "disk" ? f.disk : f.batt)
         out.push({ d: "seg", u0: 0, u1: 1, w: 0, lw: 1, col: track, dash: [1, 4] })
         out.push({ d: "seg", u0: 0, u1: Math.max(0.002, fill), w: 0, lw: 5, col: C })
         break
     case "hz":
-        if (!f.pulses) { out.push({ d: "seg", u0: 0, u1: 1, w: 0, lw: 1, col: track }); break }
+        if (!pulses) { out.push({ d: "seg", u0: 0, u1: 1, w: 0, lw: 1, col: track }); break }
         // Always drawn at phase 0: in the sigil the pulses travel by turning
         // the ring (projC, layerRate), and the strip keeps them still.
-        var K = f.pulses, ph = 0, uMax = 1
+        var K = pulses, ph = 0, uMax = 1
         var wv = function(u) { return (((u * K + ph) % 1) + 1) % 1 < 0.5 ? 0.6 : -0.6 }
         var line = [[0, wv(0)]], edges = []
         for (var q = 0; q <= 2 * K + 3; q++) { var e = (q / 2 - ph) / K; if (e > 0 && e < uMax) edges.push(e) }
@@ -511,7 +654,8 @@ function spinRate(i) { return RINGS[i].fixed ? 0 : 0.0000065 * (i % 2 ? 1 : -1) 
 // still, and a knead into the strip settles without a jump.
 function layerRate(i, s) {
     var r = spinRate(i)
-    if (RINGS[i].k === "hz" && s.facts.pulses > 0) r -= 0.00025 / s.facts.pulses
+    var d = dispOf(RINGS[i].k), p = d >= 0 ? s.facts.pulsesD[d] || 0 : 0
+    if (p > 0) r -= 0.00025 / p
     return r
 }
 // Where a ring layer points at time t, in degrees.
@@ -783,12 +927,13 @@ function icon(c, k, x, y, col, s) {
     var faint = function(fn) { var ga = c.globalAlpha; c.globalAlpha = ga * (pal.light ? 0.6 : 0.4); fn(); c.globalAlpha = ga }
     c.save()
     c.fillStyle = col
+    if (dispOf(k) >= 0) k = "hz"
     switch (k) {
     case "cores": for (j = 0; j < 4; j++) run(x + 2 + j * 4, y - 4, x + 2 + j * 4, y + 4, 0.85, 2.67); break
     case "threads": [6, 3, 7, 4, 5].forEach(function(hh, i) { run(x + 1 + i * 3.6, y + 4, x + 1 + i * 3.6, y + 4 - hh, 0.65, 2.2) }); break
     case "gpu": for (j = 0; j < 4; j++) for (q = 0; q < 2; q++) dot(x + 2 + j * 4, y - 2.5 + q * 5, 1.2); break
-    case "mem": case "disk":
-        var fr = k === "mem" ? f.mem : f.disk
+    case "mem": case "disk": case "batt":
+        var fr = Math.min(1, k === "mem" ? f.mem : k === "disk" ? f.disk : f.batt)
         faint(function() { run(x, y, x + 16, y, 0.5, 2.6) })
         run(x, y, x + Math.max(0, 16 * fr), y, 1.4, 3.4); break
     case "hz":
@@ -829,17 +974,9 @@ function icon(c, k, x, y, col, s) {
 
 // The info list: section heads and one row per ring, from the outside in.
 // The strip has the same rows: the sigil's top half read downwards, so the
-// knead can unbend the rings without any of them crossing another.
-var LIST = (function() {
-    var out = [], cat = ""
-    for (var i = RINGS.length - 1; i >= 0; i--) {
-        if (RINGS[i].cat !== cat) { cat = RINGS[i].cat; out.push({ head: cat }) }
-        out.push({ i: i })
-    }
-    return out
-})()
-var LIST_AT = {}
-LIST.forEach(function(e, j) { if (e.head) LIST_AT["h:" + e.head] = j; else LIST_AT[e.i] = j })
+// knead can unbend the rings without any of them crossing another. (Made
+// with the rings, by setRings.)
+var LIST = [], LIST_AT = {}
 
 function layout(w, h, s) {
     var narrow = w < 640, infoW = narrow ? w - 16 : Math.round(s.unit * 29)
@@ -1309,7 +1446,7 @@ function flungAt(Y, P, k, b, o, core, CP) {
     return o
 }
 
-var RCOS = new Float32Array(RINGS.length + 1), RSIN = new Float32Array(RINGS.length + 1), RA = new Float32Array(RINGS.length)
+var RCOS = new Float32Array(MAX_RINGS + 1), RSIN = new Float32Array(MAX_RINGS + 1), RA = new Float32Array(MAX_RINGS)
 function paintBurst(c, Y, t, s) {
     var _BLUR = BLUR, _BRAKE = BRAKE, _STK64 = STK64, _B_TEAR = B_TEAR, _CLOSE = CLOSE, _DIM_RING = DIM_RING, _DRIFT = DRIFT, _DRIFT_T = DRIFT_T, _DUP_C = DUP_C, _DUP_IN = DUP_IN, _DUP_L = DUP_L, _DUP_OUT = DUP_OUT, _FP = FP, _GLINT = GLINT, _GLINT_A = GLINT_A, _GLINT_W = GLINT_W, _OUT = OUT, _RA = RA, _RCOS = RCOS, _RINGS = RINGS, _RSIN = RSIN, _R_E = R_E, _SEP_FADE = SEP_FADE, _SHRINK = SHRINK, _STRATA = STRATA, _STRATA_JIT = STRATA_JIT, _SUCK0 = SUCK0, _TAU = TAU, _T_MS = T_MS, _T_OUT = T_OUT, _V_SWEEP = V_SWEEP
     var P = burstOf(Y, t, s), b = 1 - average(s.cur), ms = b * _T_OUT, bo = ms / _T_MS, ga = c.globalAlpha
@@ -2142,3 +2279,6 @@ register("burst", {
     corePulse: burstCorePulse,
     pulseBack: true
 })
+
+// One display and no battery until a reading says otherwise.
+setRings(1, false)
