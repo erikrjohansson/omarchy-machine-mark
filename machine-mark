@@ -96,6 +96,31 @@ channel=$(timeout -k 1 3 omarchy-version-channel 2>/dev/null || true)
 theme=$(timeout -k 1 3 omarchy-theme-current 2>/dev/null || true)
 host=$(hostnamectl hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || uname -n)
 
+# The battery's health: how much it holds now against how much it held new,
+# summed over the system's batteries (a mouse's or keyboard's, scope Device,
+# are left out). Charge in uAh is turned into Wh by the design voltage.
+battery=null
+for b in /sys/class/power_supply/*; do
+  [[ $(cat "$b/type" 2>/dev/null) == Battery && $(cat "$b/scope" 2>/dev/null) != Device ]] || continue
+  if [[ -r $b/energy_full && -r $b/energy_full_design ]]; then
+    full=$(<"$b/energy_full") design=$(<"$b/energy_full_design") volts=1000000
+  elif [[ -r $b/charge_full && -r $b/charge_full_design ]]; then
+    full=$(<"$b/charge_full") design=$(<"$b/charge_full_design") volts=$(cat "$b/voltage_min_design" 2>/dev/null || echo 0)
+  else continue
+  fi
+  cycles=$(cat "$b/cycle_count" 2>/dev/null || echo 0)
+  [[ $full =~ ^[0-9]+$ && $design =~ ^[0-9]+$ && $volts =~ ^[0-9]+$ && $cycles =~ ^[0-9]+$ ]] && (( design > 0 )) || continue
+  battery=$(jq -cn --argjson prev "$battery" --argjson full "$full" --argjson design "$design" --argjson volts "$volts" --argjson cycles "$cycles" '
+    # Wh, where the voltage is known (energy is reported in uWh: volts 1e6).
+    (if $volts > 0 then { wh: ($full * $volts / 1e12), designWh: ($design * $volts / 1e12) } else { wh: null, designWh: null } end) as $e
+    | ($prev // { full: 0, design: 0, wh: 0, designWh: 0, cycles: 0 }) as $p
+    | { full: ($p.full + $full), design: ($p.design + $design),
+        wh: (if $p.wh != null and $e.wh != null then $p.wh + $e.wh else null end),
+        designWh: (if $p.designWh != null and $e.designWh != null then $p.designWh + $e.designWh else null end),
+        # A battery that counts no cycles reports 0: unknown, not new.
+        cycles: (if $cycles > 0 then ($p.cycles // 0) + $cycles else $p.cycles end) }')
+done
+
 # Each module is read on its own (try … catch), so one odd or missing reading
 # leaves the rest intact; missing facts come out as null, not as zero.
 jq -n --argjson ff "$ff" \
@@ -103,18 +128,38 @@ jq -n --argjson ff "$ff" \
   --argjson upgrades "${upgrades:-0}" --argjson lastUpgrade "${last_upgrade:-0}" \
   --argjson installed "$installed" --argjson now "$(date +%s)" \
   --argjson themes "$themes" --argjson plugins "$plugins" \
-  --argjson weekly "$weekly" --argjson sizes "$sizes" "$pick_gpu$clean"'
+  --argjson weekly "$weekly" --argjson sizes "$sizes" --argjson battery "$battery" "$pick_gpu$clean"'
   def mod($t): try ($ff | map(select(type == "object" and .type == $t)) | first | .result) catch null;
   def num: if type == "number" then . else null end;
   def obj: if type == "object" then . else {} end;
-  (mod("CPU") | obj) as $cpu | (mod("Memory") | obj) as $mem | (mod("Kernel") | obj) as $kernel
+  (mod("Host") | obj) as $hst | (mod("CPU") | obj) as $cpu | (mod("Memory") | obj) as $mem | (mod("Kernel") | obj) as $kernel
   | (mod("WM") | obj) as $wm | (mod("Uptime") | obj) as $up | (mod("Packages") | obj) as $pkg
   | ((try (mod("Disk") | map(select(.mountpoint == "/")) | first) catch null) | obj) as $disk
-  | ((try (mod("Display") | map(select((try (.output.width | num) catch null) != null))
-         | sort_by(-(.output.width * (.output.height // 0)), -(.output.refreshRate // 0)) | first) catch null) | obj) as $dsp
+  # Every display, as About lists them: the screen built into a laptop first, then
+  # the rest in the order fastfetch gives (each gets a ring, at most 8).
+  | ([try (mod("Display") | map(select((try (.output.width | num) catch null) != null)) | to_entries
+          | sort_by((.value.type != "Builtin"), .key) | .[].value) catch empty] | .[:8]
+     | map({ name: (.name // ""), type: (.type // ""),
+             width: (.output.width | num), height: (.output.height? | num), hz: (.output.refreshRate? | num),
+             inches: ((.physical.width? | num) as $w | (.physical.height? | num) as $h
+                      | if ($w // 0) > 0 and ($h // 0) > 0 then (($w * $w + $h * $h) | sqrt / 25.4) else null end) })) as $dsps
   | ((try (mod("GPU") | pick_gpu) catch null) | obj) as $gpu
   | {
       host: $host,
+      # The make and model ("Lenovo ThinkPad X1 Carbon Gen 9"), or "" where the firmware
+      # only has a placeholder (a desktop board often says "System Product Name").
+      model: (($hst.vendor // "") as $v | ($hst.name // "") as $n
+              | ($v | gsub("(?i)[, ]+(inc\\.?|corporation|corp\\.?|co\\., ltd\\.?|ltd\\.?|computer inc\\.?|gmbh)$"; "")
+                    | if test("(?i)^asustek") then "ASUS" elif test("(?i)^(hewlett-packard|hp)$") then "HP"
+                      elif test("(?i)^micro-star") then "MSI" elif test("^[A-Z]+$") and length > 3 then (.[:1] + (.[1:] | ascii_downcase))
+                      else . end) as $make
+              | if ($n | test("(?i)^(|to be filled by o\\.e\\.m\\.|system product name|default string|not applicable|none|o\\.e\\.m\\.|standard pc.*)$")) then ""
+                elif ($make == "" or ($make | test("(?i)^(to be filled.*|system manufacturer|default string|o\\.e\\.m\\.)$"))) then $n
+                elif ($n | ascii_downcase | startswith($make | ascii_downcase)) then $n
+                else $make + " " + $n end),
+      battery: (if $battery == null then null else
+                { health: (if $battery.design > 0 then $battery.full / $battery.design else null end),
+                  wh: $battery.wh, designWh: $battery.designWh, cycles: (if ($battery.cycles // 0) > 0 then $battery.cycles else null end) } end),
       os: { version: (if $version != "" then $version else ((mod("OS") | obj).versionID // "") end), channel: $channel },
       kernel: ($kernel.release // ""),
       wm: { name: ($wm.prettyName // ""), version: ($wm.version // "") },
@@ -129,9 +174,9 @@ jq -n --argjson ff "$ff" \
               # Newer fastfetch gives total and free only; used = total - free, as df shows it.
               used: (($disk.bytes.used? | num) // ((($disk.bytes.total? | num) // null) as $t | (($disk.bytes.free? | num) // null) as $f
                      | if $t != null and $f != null then $t - $f else null end)) },
-      display: { width: ($dsp.output.width? | num), height: ($dsp.output.height? | num), hz: ($dsp.output.refreshRate? | num),
-                 inches: (($dsp.physical.width? | num) as $w | ($dsp.physical.height? | num) as $h
-                          | if ($w // 0) > 0 and ($h // 0) > 0 then (($w * $w + $h * $h) | sqrt / 25.4) else null end) },
+      displays: $dsps,
+      # (The first display alone, as before there were several.)
+      display: ($dsps[0] // { width: null, height: null, hz: null, inches: null }),
       packages: { pacman: ($pkg.pacman | num),
                   other: (if ($pkg.all | num) != null and ($pkg.pacman | num) != null then $pkg.all - $pkg.pacman else null end),
                   sizes: $sizes },

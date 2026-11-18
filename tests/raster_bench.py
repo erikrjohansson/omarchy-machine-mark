@@ -41,7 +41,7 @@ ShellRoot {
                 var t0 = Date.now()
                 c.reset(); c.scale(DPR, DPR)
                 var k = 0.5 + 0.5 * Math.sin(rootItem.n / 40 * Math.PI)
-                var cur = Sigil.RINGS.map(function(r, i) { return Sigil.ease(Math.max(0, Math.min(1, k * 1.4 - (13 - i) / 13 * 0.4))) })
+                var last = Sigil.RINGS.length - 1, cur = Sigil.RINGS.map(function(r, i) { return Sigil.ease(Math.max(0, Math.min(1, k * 1.4 - (last - i) / last * 0.4))) })
                 var s = { machine: rootItem.machine, facts: Sigil.facts(rootItem.machine, 0), geo: geo, pal: pal, cur: cur, hi: -1, unit: 13,
                           valW: 150, headW: { hw: 60, sw: 60, age: 90 }, builtAt: -1e9, markCache: cache,
                           bg: "#101315" }

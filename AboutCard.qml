@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Window
+import Quickshell
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui as Ui
@@ -48,6 +49,9 @@ Item {
     // Each ring's shape: 0 = strip, 1 = sigil. All rings move together: the
     // knead is one burst (Sigil.paintBurst), so they share one shape.
     property var cur: Sigil.RINGS.map(function() { return 1 })
+    // How many rings (one more for each display past the first: see
+    // Sigil.setRings; a battery adds one too); the layers and words are made per ring.
+    property int ringCount: Sigil.RINGS.length
     property int target: 1
     property var anim: null
     // Kneading back to the sigil: an animation of its own (Sigil.paintReturn),
@@ -162,6 +166,10 @@ Item {
     property string factsKey: ""
     property var memDrawn: [-1, -1]   // the memory reading each shape's layers show
     onMachineChanged: {
+        // A display plugged in or out since the last reading (or a battery
+        // put in or taken out): a ring more or less, so everything worked out per ring starts again, from the
+        // sigil building in, as when the window opens.
+        if (machine && Sigil.setRingsFor(machine)) ringsChanged()
         // (Not while a knead runs: its particles, worked out as it started,
         // would be worked out again mid-flight, every 4 s, and jump.)
         if (restShape >= 0) markCache = {}
@@ -177,6 +185,19 @@ Item {
         // New facts (say package sizes) can change the seeded shape too.
         if (key !== factsKey) { factsKey = key; geo = Sigil.geometry(machine); geo.key = geoKey(machine); redrawAll(); return }
         catchUp()
+    }
+    // (The layout first: the layers and words made for the new rings place
+    // themselves by it.)
+    function ringsChanged() {
+        markCache = {}
+        layoutMemo = null
+        geo = null
+        texts = []
+        forgetLayers()
+        reset()
+        lastLayout = layoutNow()
+        restLayout = lastLayout
+        ringCount = Sigil.RINGS.length
     }
     // Everything except the values the live reading refreshes.
     function slowKey(m) {
@@ -240,6 +261,15 @@ Item {
         status = statusText()
     }
     TextMetrics { id: metrics; font.family: card.fontName; font.pixelSize: Style.font.body }
+
+    // Everything shown, as text, onto the clipboard (the Copy button).
+    function copyAll() {
+        if (!machine) return
+        var f = Sigil.facts(machine, Math.max(0, (now() - readAt) / 1000))
+        Quickshell.execDetached(["wl-copy", "--", Sigil.report(machine, f, themeName || machine.theme)])
+        say = "Copied everything to the clipboard."
+        status = statusText(); sayDone.restart()
+    }
 
     function statusText() {
         if (say) return say
@@ -579,6 +609,19 @@ Item {
             width: parent.width
             height: headRow.implicitHeight + Style.space(24)
 
+            // Top right: copy it all, to paste anywhere.
+            Ui.Button {
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(8)
+                anchors.top: parent.top
+                anchors.topMargin: Style.space(8)
+                text: "Copy"
+                bordered: true
+                fontSize: Style.font.bodySmall
+                enabled: !!card.machine
+                onClicked: card.copyAll()
+            }
+
             Row {
                 id: headRow
                 x: Style.space(18)
@@ -629,12 +672,24 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: Style.space(1)
 
-                    Text {
-                        text: card.machine ? card.machine.host : " "
-                        color: card.fg
-                        font.family: card.fontName
-                        font.pixelSize: Style.font.title
-                        font.bold: true
+                    // The name, then the make and model, softer (where the
+                    // firmware says what it is).
+                    Row {
+                        spacing: Style.space(10)
+                        Text {
+                            text: card.machine ? card.machine.host : " "
+                            color: card.fg
+                            font.family: card.fontName
+                            font.pixelSize: Style.font.title
+                            font.bold: true
+                        }
+                        Text {
+                            visible: text !== ""
+                            text: card.machine && card.machine.model ? card.machine.model : ""
+                            color: card.dimFg
+                            font.family: card.fontName
+                            font.pixelSize: Style.font.title
+                        }
                     }
                     HoverText {
                         text: card.machine && card.machine.os.version ? "Omarchy " + card.machine.os.version : "Omarchy"
@@ -666,12 +721,13 @@ Item {
             // At rest in the sigil: one layer per ring, turned in place.
             Repeater {
                 id: ringRep
-                model: Sigil.RINGS.length
+                model: card.ringCount
                 delegate: Item {
                     id: ringLayer
                     required property int index
                     readonly property var lay: card.restLayout
-                    readonly property real size: lay ? Math.ceil(2 * (lay.R * Sigil.RINGS[index].r[1] + lay.R * 0.04 + 8)) : 0
+                    // (A ring gone with a display unplugged has no size, in the moment before its layer goes.)
+                    readonly property real size: lay && Sigil.RINGS[index] ? Math.ceil(2 * (lay.R * Sigil.RINGS[index].r[1] + lay.R * 0.04 + 8)) : 0
                     opacity: card.layerShape === 1 ? card.layerOpacity * (card.hi < 0 || card.hi === index ? 1 : Sigil.DIM_RING) : 0
                     // On the canvas's pixel grid, the ring's centre at the middle.
                     x: lay ? card.snap(lay.cx - size / 2) : 0
@@ -695,7 +751,7 @@ Item {
             // At rest in the strip: one layer per row, all still.
             Repeater {
                 id: rowRep
-                model: Sigil.RINGS.length
+                model: card.ringCount
                 delegate: Item {
                     id: rowLayer
                     required property int index
@@ -837,12 +893,12 @@ Item {
             // Each ring's name and value: in the list (sigil) or along the row (strip).
             Repeater {
                 id: wordRep
-                model: Sigil.RINGS.length
+                model: card.ringCount
                 delegate: Item {
                     id: row
                     required property int index
                     readonly property var lay: card.lastLayout
-                    readonly property real k: card.cur[index]
+                    readonly property real k: card.cur[index] || 0
                     readonly property var tx: card.texts[index] || { s: "", l: "" }
                     readonly property var p: lay ? Sigil.textPos(lay, index, k, card.unit, Math.min(shortText.implicitWidth, card.valW)) : null
                     // Values never run past their column: the strip's value
@@ -871,7 +927,7 @@ Item {
                         y: (row.skN ? row.skN.y : row.p ? row.p.y : 0) - height / 2
                         rotation: row.skL ? row.skL.rot : 0
                         scale: row.skL ? row.skL.sc : 1
-                        text: Sigil.RINGS[row.index].name
+                        text: Sigil.RINGS[row.index] ? Sigil.RINGS[row.index].name : ""
                         color: row.isHi ? Commons.Color.menu.selectedText : card.pal.dim
                         opacity: row.dim * (row.skL ? row.skL.a : 1)
                         font.family: card.fontName
